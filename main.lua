@@ -1,4 +1,4 @@
--- Neverdies.me - versión reorganizada
+-- RSWA - versión reorganizada
 -- Mantiene ESP + aimbot + configuración + opciones de rendimiento.
 -- No contiene prints/warns ni lógica de evasión de anti-cheat.
 
@@ -12,6 +12,8 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
 
@@ -152,6 +154,10 @@ local RCX = {
         View_Tracer = false,
         View_Tracer_Length = 10,
         View_Tracer_Distance = 100,
+
+        Inventory = false,
+        Inventory_Equipped = true,
+        Inventory_Max_Items = 6,
     },
 
     AI_ESP = {
@@ -188,17 +194,32 @@ local RCX = {
         FOV_Color = {R = 255, G = 255, B = 0},
     },
 
+    COMBAT = {
+        Recoil_Modifier = false,
+        Recoil_Percent = 0,
+    },
+
+    CAMERA = {
+        Zoom = true,
+        Zoom_Key = "C",
+        Zoom_Mode = "Hold",
+        Zoom_FOV = 20,
+    },
+
     PERFORMANCE = {
         Remove_Grass = false,
+
+        Brightness_Override = false,
+        Brightness = 3,
     },
 
     UI = {
         UI_Toggle_Key = "End",
         Save_Settings_Key = "Home",
-        Window_Size = {X = 750, Y = 550},
+        Window_Size = {X = 700, Y = 500},
 
         Compact_Minimize = true,
-        Compact_Width = 180,
+        Compact_Width = 150,
     },
 }
 
@@ -245,6 +266,207 @@ end
 loadSettings()
 
 --========================================================
+-- RECOIL
+--========================================================
+
+local RecoilOriginals = setmetatable({}, {__mode = "k"})
+local RecoilFolderConnection = nil
+
+local function getRecoilFolder()
+    return ReplicatedStorage:FindFirstChild("AmmoTypes")
+end
+
+local function rememberRecoilValue(object)
+    if RecoilOriginals[object] ~= nil then
+        return
+    end
+
+    local value = object:GetAttribute("RecoilStrength")
+
+    if value ~= nil then
+        RecoilOriginals[object] = value
+    end
+end
+
+local function applyRecoilToObject(object)
+    local current = object:GetAttribute("RecoilStrength")
+
+    if current == nil and RecoilOriginals[object] == nil then
+        return
+    end
+
+    rememberRecoilValue(object)
+
+    local original = RecoilOriginals[object]
+
+    if original == nil then
+        return
+    end
+
+    if not RCX.COMBAT.Recoil_Modifier then
+        pcall(function()
+            object:SetAttribute("RecoilStrength", original)
+        end)
+        return
+    end
+
+    local numericOriginal = tonumber(original)
+
+    if numericOriginal then
+        local modified =
+            numericOriginal
+            * clamp(RCX.COMBAT.Recoil_Percent, 0, 100)
+            / 100
+
+        pcall(function()
+            object:SetAttribute("RecoilStrength", modified)
+        end)
+    elseif RCX.COMBAT.Recoil_Percent <= 0 then
+        -- Compatibilidad con juegos que guardan este atributo como texto.
+        pcall(function()
+            object:SetAttribute("RecoilStrength", "0")
+        end)
+    end
+end
+
+local function applyRecoilSettings()
+    local folder = getRecoilFolder()
+
+    if not folder then
+        return
+    end
+
+    applyRecoilToObject(folder)
+
+    for _, object in ipairs(folder:GetDescendants()) do
+        applyRecoilToObject(object)
+    end
+end
+
+local function restoreRecoil()
+    for object, original in pairs(RecoilOriginals) do
+        if object and object.Parent then
+            pcall(function()
+                object:SetAttribute("RecoilStrength", original)
+            end)
+        end
+    end
+end
+
+local function setupRecoilWatcher()
+    local folder = getRecoilFolder()
+
+    if not folder then
+        return
+    end
+
+    if RecoilFolderConnection and RecoilFolderConnection.Connected then
+        RecoilFolderConnection:Disconnect()
+    end
+
+    RecoilFolderConnection = folder.DescendantAdded:Connect(function(object)
+        task.defer(function()
+            if not DESTROY then
+                applyRecoilToObject(object)
+            end
+        end)
+    end)
+
+    applyRecoilSettings()
+end
+
+setupRecoilWatcher()
+
+--========================================================
+-- ZOOM DE CÁMARA
+--========================================================
+
+local ZoomActive = false
+local ZoomRestoreFOV = nil
+local ZoomInputBeganConnection = nil
+local ZoomInputEndedConnection = nil
+local ZoomCameraConnection = nil
+
+local function getZoomKeyCode()
+    return Enum.KeyCode[RCX.CAMERA.Zoom_Key] or Enum.KeyCode.C
+end
+
+local function setZoomState(enabled)
+    local camera = Workspace.CurrentCamera
+
+    if not camera then
+        ZoomActive = false
+        return
+    end
+
+    if enabled then
+        if not RCX.CAMERA.Zoom then
+            return
+        end
+
+        if not ZoomActive then
+            ZoomRestoreFOV = camera.FieldOfView
+        end
+
+        ZoomActive = true
+        camera.FieldOfView = clamp(RCX.CAMERA.Zoom_FOV, 1, 120)
+    else
+        if ZoomActive and ZoomRestoreFOV then
+            camera.FieldOfView = ZoomRestoreFOV
+        end
+
+        ZoomActive = false
+        ZoomRestoreFOV = nil
+    end
+end
+
+ZoomInputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if DESTROY or gameProcessed or not RCX.CAMERA.Zoom then
+        return
+    end
+
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then
+        return
+    end
+
+    if input.KeyCode ~= getZoomKeyCode() then
+        return
+    end
+
+    if RCX.CAMERA.Zoom_Mode == "Toggle" then
+        setZoomState(not ZoomActive)
+    else
+        setZoomState(true)
+    end
+end)
+
+ZoomInputEndedConnection = UserInputService.InputEnded:Connect(function(input)
+    if DESTROY or RCX.CAMERA.Zoom_Mode ~= "Hold" then
+        return
+    end
+
+    if input.UserInputType == Enum.UserInputType.Keyboard
+        and input.KeyCode == getZoomKeyCode()
+    then
+        setZoomState(false)
+    end
+end)
+
+ZoomCameraConnection =
+    Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+        if ZoomActive then
+            task.defer(function()
+                local camera = Workspace.CurrentCamera
+
+                if camera then
+                    camera.FieldOfView =
+                        clamp(RCX.CAMERA.Zoom_FOV, 1, 120)
+                end
+            end)
+        end
+    end)
+
+--========================================================
 -- RENDIMIENTO / TERRENO
 --========================================================
 
@@ -284,10 +506,27 @@ end
 applyGrassSetting()
 
 --========================================================
+-- ILUMINACIÓN
+--========================================================
+
+local OriginalBrightness = Lighting.Brightness
+
+local function applyBrightnessSetting()
+    if RCX.PERFORMANCE.Brightness_Override then
+        Lighting.Brightness =
+            clamp(RCX.PERFORMANCE.Brightness, 0, 10)
+    else
+        Lighting.Brightness = OriginalBrightness
+    end
+end
+
+applyBrightnessSetting()
+
+--========================================================
 -- INTERFAZ
 --========================================================
 
-local RCX_Window = Library.NewWindow("Neverdies.me", {
+local RCX_Window = Library.NewWindow("RSWA", {
     window_size = V2(RCX.UI.Window_Size.X, RCX.UI.Window_Size.Y),
 
     window_size_func = function(newSize)
@@ -309,7 +548,7 @@ local RCX_Window = Library.NewWindow("Neverdies.me", {
 --========================================================
 
 local function setupCompactMinimize()
-    local menuGui = CoreGui:FindFirstChild("Neverdies.me")
+    local menuGui = CoreGui:FindFirstChild("RSWA")
 
     if not menuGui then
         return
@@ -369,7 +608,7 @@ local function setupCompactMinimize()
 
                 TweenService:Create(
                     mainWindow,
-                    TweenInfo.new(0.15, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+                    TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
                     {
                         Size = UDim2.fromOffset(
                             RCX.UI.Compact_Width,
@@ -382,7 +621,7 @@ local function setupCompactMinimize()
 
                 TweenService:Create(
                     mainWindow,
-                    TweenInfo.new(0.15, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+                    TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
                     {
                         Size = UDim2.fromOffset(
                             fullWidth,
@@ -517,6 +756,28 @@ PLR_INFO_Category.NewToggle("Distance", function(value)
     RCX.ESP.Distance = value
 end, {
     default = RCX.ESP.Distance,
+})
+
+PLR_INFO_Category.NewToggle("Inventory", function(value)
+    RCX.ESP.Inventory = value
+end, {
+    default = RCX.ESP.Inventory,
+})
+
+PLR_INFO_Category.NewToggle("Show Equipped Tool", function(value)
+    RCX.ESP.Inventory_Equipped = value
+end, {
+    default = RCX.ESP.Inventory_Equipped,
+})
+
+PLR_INFO_Category.NewSlider("Inventory Item Limit", function(value)
+    RCX.ESP.Inventory_Max_Items = value
+end, {
+    default = RCX.ESP.Inventory_Max_Items,
+    min = 1,
+    max = 15,
+    decimals = 0,
+    suffix = " items",
 })
 
 local BOXES_Category = ESP_Page.NewCategory("Boxes")
@@ -788,6 +1049,79 @@ do
     })
 end
 
+-- COMBAT / CAMERA
+local COMBAT_Page = RCX_Window.NewPage("Combat")
+
+local WEAPON_Category = COMBAT_Page.NewCategory("Weapon")
+
+WEAPON_Category.NewToggle("Recoil Modifier", function(value)
+    RCX.COMBAT.Recoil_Modifier = value
+    applyRecoilSettings()
+end, {
+    default = RCX.COMBAT.Recoil_Modifier,
+})
+
+WEAPON_Category.NewSlider("Recoil", function(value)
+    RCX.COMBAT.Recoil_Percent = value
+    applyRecoilSettings()
+end, {
+    default = RCX.COMBAT.Recoil_Percent,
+    min = 0,
+    max = 100,
+    decimals = 0,
+    suffix = "%",
+})
+
+local CAMERA_Category = COMBAT_Page.NewCategory("Camera")
+
+CAMERA_Category.NewToggle("Zoom", function(value)
+    RCX.CAMERA.Zoom = value
+
+    if not value then
+        setZoomState(false)
+    end
+end, {
+    default = RCX.CAMERA.Zoom,
+})
+
+CAMERA_Category.NewKeybind("Zoom Key", function()
+end, function(newKey)
+    RCX.CAMERA.Zoom_Key =
+        tostring(newKey):gsub("Enum.KeyCode.", "")
+end, {
+    default = Enum.KeyCode[RCX.CAMERA.Zoom_Key] or Enum.KeyCode.C,
+})
+
+do
+    local options = {"Hold", "Toggle"}
+    local defaultOption = table.find(options, RCX.CAMERA.Zoom_Mode) or 1
+
+    CAMERA_Category.NewDropdown("Zoom Mode", function(option)
+        if ZoomActive then
+            setZoomState(false)
+        end
+
+        RCX.CAMERA.Zoom_Mode = option
+    end, {
+        options = options,
+        default = defaultOption,
+    })
+end
+
+CAMERA_Category.NewSlider("Zoom FOV", function(value)
+    RCX.CAMERA.Zoom_FOV = value
+
+    if ZoomActive and Workspace.CurrentCamera then
+        Workspace.CurrentCamera.FieldOfView = value
+    end
+end, {
+    default = RCX.CAMERA.Zoom_FOV,
+    min = 5,
+    max = 90,
+    decimals = 0,
+    suffix = "°",
+})
+
 -- PERFORMANCE
 local PERFORMANCE_Page = RCX_Window.NewPage("Performance")
 
@@ -798,6 +1132,27 @@ WORLD_PERFORMANCE_Category.NewToggle("Remove Grass", function(value)
     applyGrassSetting()
 end, {
     default = RCX.PERFORMANCE.Remove_Grass,
+})
+
+WORLD_PERFORMANCE_Category.NewToggle("Brightness Override", function(value)
+    RCX.PERFORMANCE.Brightness_Override = value
+    applyBrightnessSetting()
+end, {
+    default = RCX.PERFORMANCE.Brightness_Override,
+})
+
+WORLD_PERFORMANCE_Category.NewSlider("Brightness", function(value)
+    RCX.PERFORMANCE.Brightness = value
+
+    if RCX.PERFORMANCE.Brightness_Override then
+        applyBrightnessSetting()
+    end
+end, {
+    default = RCX.PERFORMANCE.Brightness,
+    min = 0,
+    max = 10,
+    decimals = 1,
+    suffix = "",
 })
 
 local INTERFACE_PERFORMANCE_Category = PERFORMANCE_Page.NewCategory("Interface")
@@ -812,8 +1167,8 @@ INTERFACE_PERFORMANCE_Category.NewSlider("Compact Width", function(value)
     RCX.UI.Compact_Width = value
 end, {
     default = RCX.UI.Compact_Width,
-    min = 140,
-    max = 300,
+    min = 120,
+    max = 260,
     decimals = 0,
     suffix = " px",
 })
@@ -837,6 +1192,15 @@ MAIN_SETTINGS_Category.NewKeybind("Save Settings Keybind", saveSettings, functio
 end, {
     default = Enum.KeyCode[RCX.UI.Save_Settings_Key],
 })
+
+local ABOUT_SETTINGS_Category = SETTINGS_Page.NewCategory("RSWA")
+
+ABOUT_SETTINGS_Category.NewButton("Restore Default Window Size", function()
+    RCX.UI.Window_Size = {
+        X = 700,
+        Y = 500,
+    }
+end)
 
 --========================================================
 -- ESTADO COMPARTIDO
@@ -886,6 +1250,62 @@ local function getHumanoid(character)
     end
 
     return character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getVisibleInventory(player, character)
+    local names = {}
+    local seen = {}
+    local maxItems = math.max(1, RCX.ESP.Inventory_Max_Items)
+
+    local function addTool(tool, equipped)
+        if not tool:IsA("Tool") then
+            return
+        end
+
+        local key = tool.Name
+
+        if seen[key] then
+            return
+        end
+
+        seen[key] = true
+
+        if equipped then
+            table.insert(names, "★ " .. tool.Name)
+        else
+            table.insert(names, tool.Name)
+        end
+    end
+
+    if RCX.ESP.Inventory_Equipped and character then
+        for _, object in ipairs(character:GetChildren()) do
+            addTool(object, true)
+
+            if #names >= maxItems then
+                return names, false
+            end
+        end
+    end
+
+    local backpack = player and player:FindFirstChildOfClass("Backpack")
+
+    if backpack then
+        local totalTools = 0
+
+        for _, object in ipairs(backpack:GetChildren()) do
+            if object:IsA("Tool") then
+                totalTools = totalTools + 1
+
+                if #names < maxItems then
+                    addTool(object, false)
+                end
+            end
+        end
+
+        return names, totalTools <= maxItems
+    end
+
+    return names, true
 end
 
 local function sameTeam(player)
@@ -1373,7 +1793,9 @@ local function addESP(player)
             setBoxVisibility(drawings.boxLines, false, 0)
         end
 
-        if RCX.ESP.Info and distance < RCX.ESP.Max_Info_Distance then
+        if (RCX.ESP.Info or RCX.ESP.Inventory)
+            and distance < RCX.ESP.Max_Info_Distance
+        then
             local showInfo = true
 
             if RCX.ESP.Hover_Info then
@@ -1386,30 +1808,73 @@ local function addESP(player)
             end
 
             if showInfo then
+                local lines = {}
                 local parts = {}
 
-                if RCX.ESP.Health then
-                    table.insert(
-                        parts,
-                        tostring(round(humanoid.Health / humanoid.MaxHealth * 100)) .. "%"
-                    )
+                if RCX.ESP.Info then
+                    if RCX.ESP.Health then
+                        table.insert(
+                            parts,
+                            tostring(
+                                round(
+                                    humanoid.Health
+                                    / math.max(humanoid.MaxHealth, 1)
+                                    * 100
+                                )
+                            ) .. "%"
+                        )
+                    end
+
+                    if RCX.ESP.Names then
+                        table.insert(parts, player.Name)
+                    end
+
+                    if RCX.ESP.Distance then
+                        table.insert(
+                            parts,
+                            "(" .. tostring(round(distance)) .. ")"
+                        )
+                    end
                 end
 
-                if RCX.ESP.Names then
-                    table.insert(parts, player.Name)
+                if #parts > 0 then
+                    table.insert(lines, table.concat(parts, " "))
                 end
 
-                if RCX.ESP.Distance then
-                    table.insert(parts, "(" .. tostring(round(distance)) .. ")")
+                if RCX.ESP.Inventory then
+                    local inventory, complete =
+                        getVisibleInventory(player, character)
+
+                    if #inventory > 0 then
+                        local inventoryText =
+                            "INV: " .. table.concat(inventory, ", ")
+
+                        if not complete then
+                            inventoryText = inventoryText .. ", ..."
+                        end
+
+                        table.insert(lines, inventoryText)
+                    else
+                        table.insert(lines, "INV: empty / not replicated")
+                    end
                 end
 
-                drawings.info.Text = table.concat(parts, " ")
+                drawings.info.Text = table.concat(lines, "\n")
                 drawings.info.Position =
-                    V2(rootX, rootY - halfHeight - drawings.info.TextBounds.Y)
+                    V2(
+                        rootX,
+                        rootY
+                            - halfHeight
+                            - drawings.info.TextBounds.Y
+                            - 2
+                    )
 
-                drawings.info.Visible = #parts > 0
+                drawings.info.Visible = #lines > 0
 
-                setHumanoidNameHidden(humanoid, drawings.info.Visible)
+                setHumanoidNameHidden(
+                    humanoid,
+                    drawings.info.Visible and RCX.ESP.Names
+                )
             else
                 drawings.info.Visible = false
                 setHumanoidNameHidden(humanoid, false)
@@ -1936,6 +2401,25 @@ aimbotConnection = RunService.RenderStepped:Connect(function()
         Aiming = false
 
         setTerrainDecoration(OriginalTerrainDecoration)
+        Lighting.Brightness = OriginalBrightness
+        restoreRecoil()
+        setZoomState(false)
+
+        if RecoilFolderConnection and RecoilFolderConnection.Connected then
+            RecoilFolderConnection:Disconnect()
+        end
+
+        if ZoomInputBeganConnection and ZoomInputBeganConnection.Connected then
+            ZoomInputBeganConnection:Disconnect()
+        end
+
+        if ZoomInputEndedConnection and ZoomInputEndedConnection.Connected then
+            ZoomInputEndedConnection:Disconnect()
+        end
+
+        if ZoomCameraConnection and ZoomCameraConnection.Connected then
+            ZoomCameraConnection:Disconnect()
+        end
 
         FOV:Remove()
 
