@@ -103,10 +103,12 @@ local resizeHandle = new("TextButton", { Name = "Resize_Handle", AnchorPoint = V
     local compactWidth = 180
     local expandedSize = root.Size
     local expandedPosition = root.Position
+    local expandedTopLeft = nil
     local dragging = false
     local dragInput = nil
     local dragStart = nil
     local dragStartPosition = nil
+    local dragStartTopLeft = nil
     local resizing = false
     local resizeStart = nil
     local resizeStartSize = nil
@@ -118,29 +120,86 @@ tween(page.Button, 0.12, { BackgroundColor3 = active and UI_THEME.AccentSoft or 
         end
         currentPage = pageObject
     end
+    local function getViewportSize()
+        local camera = Workspace.CurrentCamera
+        return camera and camera.ViewportSize or V2(1920, 1080)
+    end
+
+    local function getSizePixels(size)
+        local viewport = getViewportSize()
+        return V2(
+            size.X.Offset + viewport.X * size.X.Scale,
+            size.Y.Offset + viewport.Y * size.Y.Scale
+        )
+    end
+
+    local function topLeftToPosition(topLeft, size)
+        local pixels = getSizePixels(size)
+        return UDim2.fromOffset(
+            topLeft.X + pixels.X * root.AnchorPoint.X,
+            topLeft.Y + pixels.Y * root.AnchorPoint.Y
+        )
+    end
+
+    local function clampTopLeft(topLeft, size)
+        local viewport = getViewportSize()
+        local pixels = getSizePixels(size)
+        local maxX = math.max(0, viewport.X - math.min(pixels.X, viewport.X))
+        local maxY = math.max(0, viewport.Y - 48)
+        return V2(
+            clamp(topLeft.X, 0, maxX),
+            clamp(topLeft.Y, 0, maxY)
+        )
+    end
+
+    local function getCurrentTopLeft()
+        return V2(root.AbsolutePosition.X, root.AbsolutePosition.Y)
+    end
+
     local function restoreWindow()
         if not minimized then
             return
         end
+
+        local topLeft = expandedTopLeft or getCurrentTopLeft()
+        topLeft = clampTopLeft(topLeft, expandedSize)
+        expandedTopLeft = topLeft
+        expandedPosition = topLeftToPosition(topLeft, expandedSize)
+
         minimized = false
         body.Visible = true
         resizeHandle.Visible = true
         minimizeButton.Text = "−"
-tween(root, 0.16, { Size = expandedSize, Position = expandedPosition, })
+
+        tween(root, 0.16, {
+            Size = expandedSize,
+            Position = expandedPosition,
+        })
     end
+
     local function minimizeWindow()
         if minimized then
             restoreWindow()
             return
         end
+
         expandedSize = root.Size
-        expandedPosition = root.Position
+        expandedTopLeft = clampTopLeft(getCurrentTopLeft(), expandedSize)
+        expandedPosition = topLeftToPosition(expandedTopLeft, expandedSize)
+
         minimized = true
         body.Visible = false
         resizeHandle.Visible = false
         minimizeButton.Text = "+"
+
         local width = compactEnabled and compactWidth or math.max(260, root.AbsoluteSize.X)
-tween(root, 0.16, { Size = UDim2.fromOffset(width, 48), })
+        local compactSize = UDim2.fromOffset(width, 48)
+        local compactTopLeft = clampTopLeft(expandedTopLeft, compactSize)
+
+        tween(root, 0.16, {
+            Size = compactSize,
+            Position = topLeftToPosition(compactTopLeft, compactSize),
+        })
     end
     minimizeButton.MouseButton1Click:Connect(minimizeWindow)
     minimizeButton.MouseEnter:Connect(function()
@@ -166,11 +225,13 @@ tween(closeButton, 0.1, { BackgroundColor3 = UI_THEME.Card, TextColor3 = UI_THEM
             dragging = true
             dragStart = input.Position
             dragStartPosition = root.Position
+            dragStartTopLeft = getCurrentTopLeft()
 
             input.Changed:Connect(function()
                 if input.UserInputState == Enum.UserInputState.End then
                     dragging = false
                     dragInput = nil
+                    dragStartTopLeft = nil
                 end
             end)
         end
@@ -193,17 +254,25 @@ tween(closeButton, 0.1, { BackgroundColor3 = UI_THEME.Card, TextColor3 = UI_THEM
             and dragInput
             and input == dragInput
             and dragStart
-            and dragStartPosition
+            and dragStartTopLeft
         then
             local delta = input.Position - dragStart
-            root.Position = UDim2.new(
-                dragStartPosition.X.Scale,
-                dragStartPosition.X.Offset + delta.X,
-                dragStartPosition.Y.Scale,
-                dragStartPosition.Y.Offset + delta.Y
+            local currentSize = root.Size
+            local newTopLeft = clampTopLeft(
+                dragStartTopLeft + V2(delta.X, delta.Y),
+                currentSize
             )
 
-            expandedPosition = root.Position
+            root.Position = topLeftToPosition(newTopLeft, currentSize)
+
+            if minimized then
+                expandedTopLeft = newTopLeft
+                expandedPosition = topLeftToPosition(newTopLeft, expandedSize)
+            else
+                expandedTopLeft = newTopLeft
+                expandedPosition = root.Position
+            end
+
             return
         end
 
@@ -227,6 +296,7 @@ tween(closeButton, 0.1, { BackgroundColor3 = UI_THEME.Card, TextColor3 = UI_THEM
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = false
             dragInput = nil
+            dragStartTopLeft = nil
             resizing = false
         end
     end)
