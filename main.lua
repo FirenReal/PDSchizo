@@ -8,6 +8,7 @@ local GuiService = game:GetService("GuiService")
 local HttpService = game:GetService("HttpService")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 -- Atajos
@@ -646,6 +647,8 @@ local RCX = {
     },
 AI_ESP = { Toggle = true, Max_Distance = 500, Names = true, Health = true, Distance = true, Head_Dot = true, Boxes = true, Health_Bar = true, Fade = true, Color = {R = 0, G = 210, B = 255}, Text_Size = 13, Dot_Size = 4, },
 AIMBOT = { Toggle = false, Bone = "Head", Smoothness = 0.5, Distance_Type = "Mouse", Aim_Key = "Q", Aim_Mode = "Key", Team_Check = false, Ignore_Players = "", FOV = false, FOV_Radius = 50, FOV_Color = {R = 255, G = 255, B = 0}, },
+COMBAT = { Recoil_Modifier = false, Recoil_Percent = 0, },
+CAMERA = { Zoom = true, Zoom_Key = "C", Zoom_Mode = "Hold", Zoom_FOV = 20, },
 PERFORMANCE = { Remove_Grass = false, },
 UI = { UI_Toggle_Key = "End", Save_Settings_Key = "Home", Window_Size = {X = 750, Y = 550}, Compact_Minimize = true, Compact_Width = 180, },
 }
@@ -681,6 +684,183 @@ local function saveSettings()
     end)
 end
 loadSettings()
+
+-- Recoil
+local RecoilOriginals = setmetatable({}, {__mode = "k"})
+local RecoilFolderConnection = nil
+
+local function getAmmoFolder()
+    return ReplicatedStorage:FindFirstChild("AmmoTypes")
+end
+
+local function rememberRecoil(object)
+    if RecoilOriginals[object] ~= nil then
+        return
+    end
+
+    local value = object:GetAttribute("RecoilStrength")
+    if value ~= nil then
+        RecoilOriginals[object] = value
+    end
+end
+
+local function applyRecoilObject(object)
+    local current = object:GetAttribute("RecoilStrength")
+    if current == nil and RecoilOriginals[object] == nil then
+        return
+    end
+
+    rememberRecoil(object)
+    local original = RecoilOriginals[object]
+    if original == nil then
+        return
+    end
+
+    if not RCX.COMBAT.Recoil_Modifier then
+        pcall(function()
+            object:SetAttribute("RecoilStrength", original)
+        end)
+        return
+    end
+
+    local numeric = tonumber(original)
+    if numeric then
+        local value = numeric * clamp(RCX.COMBAT.Recoil_Percent, 0, 100) / 100
+        pcall(function()
+            object:SetAttribute("RecoilStrength", value)
+        end)
+    elseif RCX.COMBAT.Recoil_Percent <= 0 then
+        pcall(function()
+            object:SetAttribute("RecoilStrength", "0")
+        end)
+    end
+end
+
+local function applyRecoilSettings()
+    local folder = getAmmoFolder()
+    if not folder then
+        return
+    end
+
+    applyRecoilObject(folder)
+    for _, object in ipairs(folder:GetDescendants()) do
+        applyRecoilObject(object)
+    end
+end
+
+local function restoreRecoil()
+    for object, original in pairs(RecoilOriginals) do
+        if object and object.Parent then
+            pcall(function()
+                object:SetAttribute("RecoilStrength", original)
+            end)
+        end
+    end
+end
+
+local function setupRecoilWatcher()
+    local folder = getAmmoFolder()
+    if not folder then
+        return
+    end
+
+    if RecoilFolderConnection and RecoilFolderConnection.Connected then
+        RecoilFolderConnection:Disconnect()
+    end
+
+    RecoilFolderConnection = folder.DescendantAdded:Connect(function(object)
+        task.defer(function()
+            if not DESTROY then
+                applyRecoilObject(object)
+            end
+        end)
+    end)
+
+    applyRecoilSettings()
+end
+
+setupRecoilWatcher()
+
+-- Zoom
+local ZoomActive = false
+local ZoomOriginalFOV = nil
+local ZoomInputBeganConnection = nil
+local ZoomInputEndedConnection = nil
+local ZoomCameraConnection = nil
+
+local function getZoomKey()
+    return Enum.KeyCode[RCX.CAMERA.Zoom_Key] or Enum.KeyCode.C
+end
+
+local function setZoomState(enabled)
+    local camera = Workspace.CurrentCamera
+    if not camera then
+        ZoomActive = false
+        ZoomOriginalFOV = nil
+        return
+    end
+
+    if enabled then
+        if not RCX.CAMERA.Zoom then
+            return
+        end
+
+        if not ZoomActive then
+            ZoomOriginalFOV = camera.FieldOfView
+        end
+
+        ZoomActive = true
+        camera.FieldOfView = clamp(RCX.CAMERA.Zoom_FOV, 5, 120)
+    else
+        if ZoomActive and ZoomOriginalFOV then
+            camera.FieldOfView = ZoomOriginalFOV
+        end
+
+        ZoomActive = false
+        ZoomOriginalFOV = nil
+    end
+end
+
+ZoomInputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if DESTROY or gameProcessed or not RCX.CAMERA.Zoom then
+        return
+    end
+
+    if input.UserInputType ~= Enum.UserInputType.Keyboard or input.KeyCode ~= getZoomKey() then
+        return
+    end
+
+    if RCX.CAMERA.Zoom_Mode == "Toggle" then
+        setZoomState(not ZoomActive)
+    else
+        setZoomState(true)
+    end
+end)
+
+ZoomInputEndedConnection = UserInputService.InputEnded:Connect(function(input)
+    if DESTROY or RCX.CAMERA.Zoom_Mode ~= "Hold" then
+        return
+    end
+
+    if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == getZoomKey() then
+        setZoomState(false)
+    end
+end)
+
+ZoomCameraConnection = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if not ZoomActive then
+        return
+    end
+
+    task.defer(function()
+        local camera = Workspace.CurrentCamera
+        if camera then
+            ZoomOriginalFOV = camera.FieldOfView
+            camera.FieldOfView = clamp(RCX.CAMERA.Zoom_FOV, 5, 120)
+        end
+    end)
+end)
+
 -- Rendimiento
 local Terrain = Workspace:FindFirstChildOfClass("Terrain")
 local OriginalTerrainDecoration = true
@@ -918,6 +1098,65 @@ IGNORE_AIMBOT_Category.NewButton("Clear Ignore List", function()
     RCX.AIMBOT.Ignore_Players = ""
     IgnorePlayersInput:Set("")
 end)
+-- Combat
+local COMBAT_Page = RCX_Window.NewPage("Combat")
+
+local RECOIL_Category = COMBAT_Page.NewCategory("Recoil")
+RECOIL_Category.NewToggle("Recoil Modifier", function(value)
+    RCX.COMBAT.Recoil_Modifier = value
+    applyRecoilSettings()
+end, { default = RCX.COMBAT.Recoil_Modifier, })
+
+RECOIL_Category.NewSlider("Recoil", function(value)
+    RCX.COMBAT.Recoil_Percent = value
+    applyRecoilSettings()
+end, {
+    default = RCX.COMBAT.Recoil_Percent,
+    min = 0,
+    max = 100,
+    decimals = 0,
+    suffix = "%",
+})
+
+local ZOOM_Category = COMBAT_Page.NewCategory("Zoom")
+ZOOM_Category.NewToggle("Zoom", function(value)
+    RCX.CAMERA.Zoom = value
+    if not value then
+        setZoomState(false)
+    end
+end, { default = RCX.CAMERA.Zoom, })
+
+ZOOM_Category.NewKeybind("Zoom Key", function()
+end, function(newKey)
+    RCX.CAMERA.Zoom_Key = tostring(newKey):gsub("Enum.KeyCode.", "")
+end, { default = Enum.KeyCode[RCX.CAMERA.Zoom_Key] or Enum.KeyCode.C, })
+
+do
+    local options = {"Hold", "Toggle"}
+    local defaultOption = table.find(options, RCX.CAMERA.Zoom_Mode) or 1
+
+    ZOOM_Category.NewDropdown("Zoom Mode", function(option)
+        if ZoomActive then
+            setZoomState(false)
+        end
+        RCX.CAMERA.Zoom_Mode = option
+    end, { options = options, default = defaultOption, })
+end
+
+ZOOM_Category.NewSlider("Zoom FOV", function(value)
+    RCX.CAMERA.Zoom_FOV = value
+
+    if ZoomActive and Workspace.CurrentCamera then
+        Workspace.CurrentCamera.FieldOfView = value
+    end
+end, {
+    default = RCX.CAMERA.Zoom_FOV,
+    min = 5,
+    max = 90,
+    decimals = 0,
+    suffix = "°",
+})
+
 -- Rendimiento UI
 local PERFORMANCE_Page = RCX_Window.NewPage("Performance")
 local WORLD_PERFORMANCE_Category = PERFORMANCE_Page.NewCategory("World")
@@ -1927,6 +2166,22 @@ aimbotConnection = RunService.RenderStepped:Connect(function()
         AimActivation = nil
         Aiming = false
         setTerrainDecoration(OriginalTerrainDecoration)
+        restoreRecoil()
+        setZoomState(false)
+
+        if RecoilFolderConnection and RecoilFolderConnection.Connected then
+            RecoilFolderConnection:Disconnect()
+        end
+        if ZoomInputBeganConnection and ZoomInputBeganConnection.Connected then
+            ZoomInputBeganConnection:Disconnect()
+        end
+        if ZoomInputEndedConnection and ZoomInputEndedConnection.Connected then
+            ZoomInputEndedConnection:Disconnect()
+        end
+        if ZoomCameraConnection and ZoomCameraConnection.Connected then
+            ZoomCameraConnection:Disconnect()
+        end
+
         FOV:Remove()
         if aimInputBegan and aimInputBegan.Connected then
             aimInputBegan:Disconnect()
