@@ -642,10 +642,11 @@ local RCX = {
         View_Tracer_Distance = 100,
         Head_Dot = true,
         Fade = true,
+        Show_Bodies = true,
         Text_Size = 13,
         Dot_Size = 4,
     },
-AI_ESP = { Toggle = true, Max_Distance = 500, Names = true, Health = true, Distance = true, Head_Dot = true, Boxes = true, Health_Bar = true, Fade = true, Color = {R = 0, G = 210, B = 255}, Text_Size = 13, Dot_Size = 4, },
+AI_ESP = { Toggle = true, Max_Distance = 500, Names = true, Health = true, Distance = true, Head_Dot = true, Boxes = true, Health_Bar = true, Fade = true, Show_Bodies = true, Color = {R = 0, G = 210, B = 255}, Text_Size = 13, Dot_Size = 4, },
 AIMBOT = { Toggle = false, Bone = "Head", Smoothness = 0.5, Distance_Type = "Mouse", Aim_Key = "Q", Aim_Mode = "Key", Team_Check = false, Ignore_Players = "", FOV = false, FOV_Radius = 50, FOV_Color = {R = 255, G = 255, B = 0}, },
 COMBAT = { Recoil_Modifier = false, Recoil_Percent = 0, },
 CAMERA = { Zoom = true, Zoom_Key = "C", Zoom_Mode = "Hold", Zoom_FOV = 20, },
@@ -960,6 +961,9 @@ end, { default = RCX.ESP.Head_Dot, })
 PLR_INFO_Category.NewToggle("Distance Fade", function(value)
     RCX.ESP.Fade = value
 end, { default = RCX.ESP.Fade, })
+PLR_INFO_Category.NewToggle("Show Bodies", function(value)
+    RCX.ESP.Show_Bodies = value
+end, { default = RCX.ESP.Show_Bodies, })
 PLR_INFO_Category.NewSlider("Text Size", function(value)
     RCX.ESP.Text_Size = value
 end, { default = RCX.ESP.Text_Size, min = 10, max = 20, decimals = 0, suffix = " px", })
@@ -1030,6 +1034,9 @@ end, { default = RCX.AI_ESP.Distance, })
 AI_ESP_Category.NewToggle("Distance Fade", function(value)
     RCX.AI_ESP.Fade = value
 end, { default = RCX.AI_ESP.Fade, })
+AI_ESP_Category.NewToggle("Show Bodies", function(value)
+    RCX.AI_ESP.Show_Bodies = value
+end, { default = RCX.AI_ESP.Show_Bodies, })
 AI_ESP_Category.NewSlider("Text Size", function(value)
     RCX.AI_ESP.Text_Size = value
 end, { default = RCX.AI_ESP.Text_Size, min = 10, max = 20, decimals = 0, suffix = " px", })
@@ -1533,7 +1540,7 @@ local drawings = { info = ESP_API.NewText({ Center = true, Outline = true, Size 
             or not localRoot
             or not rootPart
             or not humanoid
-            or humanoid.Health <= 0
+            or (humanoid.Health <= 0 and not RCX.ESP.Show_Bodies)
         then
             hideDrawing(drawings)
             restoreHumanoidName()
@@ -2000,7 +2007,7 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                 or not rootPart
             then
                 hideAIESP(data)
-            elseif humanoid.Health <= 0 then
+            elseif humanoid.Health <= 0 and not RCX.AI_ESP.Show_Bodies then
                 hideAIESP(data)
             else
                 local distance = (rootPart.Position - localRoot.Position).Magnitude
