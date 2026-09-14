@@ -76,6 +76,18 @@ local minimizeButton = new("TextButton", { Name = "Minimize_Button", AnchorPoint
     addCorner(minimizeButton, 7)
 local closeButton = new("TextButton", { Name = "Close_Button", AnchorPoint = V2(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0), Size = UDim2.fromOffset(30, 30), BackgroundColor3 = UI_THEME.Card, BorderSizePixel = 0, AutoButtonColor = false, Font = Enum.Font.GothamBold, Text = "×", TextColor3 = UI_THEME.Muted, TextSize = 17, ZIndex = 7, Parent = topBar, })
     addCorner(closeButton, 7)
+local dragZone = new("TextButton", {
+    Name = "Drag_Zone",
+    Position = UDim2.fromOffset(0, 0),
+    Size = UDim2.new(1, -78, 1, 0),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    AutoButtonColor = false,
+    Text = "",
+    Active = true,
+    ZIndex = 5,
+    Parent = topBar,
+})
 local body = new("Frame", { Name = "Body", Position = UDim2.fromOffset(0, 48), Size = UDim2.new(1, 0, 1, -48), BackgroundTransparency = 1, BorderSizePixel = 0, Parent = root, })
 local sidebar = new("Frame", { Name = "Sidebar", Size = UDim2.new(0, 142, 1, 0), BackgroundColor3 = UI_THEME.Surface, BorderSizePixel = 0, Parent = body, })
 local sidebarPadding = new("UIPadding", { PaddingTop = UDim.new(0, 12), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10), Parent = sidebar, })
@@ -92,6 +104,7 @@ local resizeHandle = new("TextButton", { Name = "Resize_Handle", AnchorPoint = V
     local expandedSize = root.Size
     local expandedPosition = root.Position
     local dragging = false
+    local dragInput = nil
     local dragStart = nil
     local dragStartPosition = nil
     local resizing = false
@@ -148,14 +161,24 @@ tween(closeButton, 0.1, { BackgroundColor3 = UI_THEME.Card, TextColor3 = UI_THEM
         end
         gui:Destroy()
     end)
-    topBar.InputBegan:Connect(function(input)
+    dragZone.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
-            local localX = input.Position.X - topBar.AbsolutePosition.X
-            if localX <= topBar.AbsoluteSize.X - 78 then
-                dragging = true
-                dragStart = input.Position
-                dragStartPosition = root.Position
-            end
+            dragging = true
+            dragStart = input.Position
+            dragStartPosition = root.Position
+
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    dragInput = nil
+                end
+            end)
+        end
+    end)
+
+    dragZone.InputChanged:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseMovement then
+            dragInput = input
         end
     end)
     resizeHandle.InputBegan:Connect(function(input)
@@ -166,10 +189,12 @@ tween(closeButton, 0.1, { BackgroundColor3 = UI_THEME.Card, TextColor3 = UI_THEM
         end
     end)
     UserInputService.InputChanged:Connect(function(input)
-        if input.UserInputType ~= Enum.UserInputType.MouseMovement then
-            return
-        end
-        if dragging and dragStart and dragStartPosition then
+        if dragging
+            and dragInput
+            and input == dragInput
+            and dragStart
+            and dragStartPosition
+        then
             local delta = input.Position - dragStart
             root.Position = UDim2.new(
                 dragStartPosition.X.Scale,
@@ -177,13 +202,22 @@ tween(closeButton, 0.1, { BackgroundColor3 = UI_THEME.Card, TextColor3 = UI_THEM
                 dragStartPosition.Y.Scale,
                 dragStartPosition.Y.Offset + delta.Y
             )
+
             expandedPosition = root.Position
-        elseif resizing and resizeStart and resizeStartSize then
+            return
+        end
+
+        if resizing
+            and input.UserInputType == Enum.UserInputType.MouseMovement
+            and resizeStart
+            and resizeStartSize
+        then
             local delta = input.Position - resizeStart
             local width = clamp(resizeStartSize.X + delta.X, 560, 980)
             local height = clamp(resizeStartSize.Y + delta.Y, 380, 760)
             root.Size = UDim2.fromOffset(width, height)
             expandedSize = root.Size
+
             if options.window_size_func then
                 pcall(options.window_size_func, V2(width, height))
             end
@@ -192,6 +226,7 @@ tween(closeButton, 0.1, { BackgroundColor3 = UI_THEME.Card, TextColor3 = UI_THEM
     UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = false
+            dragInput = nil
             resizing = false
         end
     end)
@@ -854,6 +889,17 @@ end
 local function getMousePosition()
     return V2(Mouse.X, Mouse.Y + GuiInset.Y)
 end
+
+local function isOnViewport(camera, screenPoint, visibleFlag)
+    if not camera or not screenPoint or not visibleFlag or screenPoint.Z <= 0 then
+        return false
+    end
+    local size = camera.ViewportSize
+    return screenPoint.X >= 0
+        and screenPoint.X <= size.X
+        and screenPoint.Y >= 0
+        and screenPoint.Y <= size.Y
+end
 local function getCharacter(player)
     if not player then
         return nil
@@ -1192,7 +1238,7 @@ local drawings = { info = ESP_API.NewText({ Center = true, Outline = true, Size 
         then
             local head = character.Head
             local headPosition, headVisible = camera:WorldToViewportPoint(head.Position)
-            if headVisible then
+            if isOnViewport(camera, headPosition, headVisible) then
                 local directionPosition = camera:WorldToViewportPoint(
                     (head.CFrame * CF(0, 0, -RCX.ESP.View_Tracer_Length)).Position
                 )
@@ -1205,12 +1251,8 @@ local drawings = { info = ESP_API.NewText({ Center = true, Outline = true, Size 
         else
             drawings.tracer.Visible = false
         end
-        if not onScreen or rootPosition.Z <= 0 then
-            drawings.info.Visible = false
-            drawings.bar.Visible = false
-            drawings.healthBar.Visible = false
-            drawings.tracer.Visible = false
-            setBoxVisibility(drawings.boxLines, false, 0)
+        if not isOnViewport(camera, rootPosition, onScreen) then
+            hideDrawing(drawings)
             restoreHumanoidName()
             return
         end
@@ -1255,8 +1297,15 @@ local drawings = { info = ESP_API.NewText({ Center = true, Outline = true, Size 
         if RCX.ESP.Head_Dot and head and head:IsA("BasePart") then
             local headScreen, headVisible =
                 camera:WorldToViewportPoint(head.Position)
+            local maxDotDistance = math.max(
+                RCX.ESP.Max_Info_Distance,
+                RCX.ESP.Boxes_Distance,
+                RCX.ESP.Health_Bar_Distance,
+                RCX.ESP.View_Tracer_Distance
+            )
             local showHeadDot =
-                headVisible and headScreen.Z > 0
+                distance <= maxDotDistance
+                and isOnViewport(camera, headScreen, headVisible)
             if showHeadDot then
                 drawings.dot.Position =
                     V2(headScreen.X, headScreen.Y)
@@ -1651,7 +1700,7 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                 else
                     local rootScreen, rootOnScreen =
                         camera:WorldToViewportPoint(rootPart.Position)
-                    if not rootOnScreen or rootScreen.Z <= 0 then
+                    if not isOnViewport(camera, rootScreen, rootOnScreen) then
                         hideAIESP(data)
                     else
                         local minX, minY, maxX, maxY =
@@ -1731,8 +1780,12 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                             data.dot.Color = aiColor
                             local showDot =
                                 RCX.AI_ESP.Head_Dot
-                                and headOnScreen
-                                and headScreen.Z > 0
+                                and distance <= RCX.AI_ESP.Max_Distance
+                                and isOnViewport(
+                                    camera,
+                                    headScreen,
+                                    headOnScreen
+                                )
                             data.dotOutline.Visible = showDot
                             data.dot.Visible = showDot
                             if RCX.AI_ESP.Boxes then
