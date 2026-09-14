@@ -1,6 +1,7 @@
 -- RSWA - versión reorganizada
 -- Mantiene ESP + aimbot + configuración + opciones de rendimiento.
 -- No contiene prints/warns ni lógica de evasión de anti-cheat.
+-- Correcciones de estabilidad y ESP aplicadas.
 
 --========================================================
 -- SERVICIOS
@@ -12,8 +13,6 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 local HttpService = game:GetService("HttpService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
 
@@ -155,9 +154,10 @@ local RCX = {
         View_Tracer_Length = 10,
         View_Tracer_Distance = 100,
 
-        Inventory = false,
-        Inventory_Equipped = true,
-        Inventory_Max_Items = 6,
+        Head_Dot = true,
+        Fade = true,
+        Text_Size = 13,
+        Dot_Size = 4,
     },
 
     AI_ESP = {
@@ -189,37 +189,24 @@ local RCX = {
 
         Team_Check = false,
 
+        Ignore_Players = "",
+
         FOV = false,
         FOV_Radius = 50,
         FOV_Color = {R = 255, G = 255, B = 0},
     },
 
-    COMBAT = {
-        Recoil_Modifier = false,
-        Recoil_Percent = 0,
-    },
-
-    CAMERA = {
-        Zoom = true,
-        Zoom_Key = "C",
-        Zoom_Mode = "Hold",
-        Zoom_FOV = 20,
-    },
-
     PERFORMANCE = {
         Remove_Grass = false,
-
-        Brightness_Override = false,
-        Brightness = 3,
     },
 
     UI = {
         UI_Toggle_Key = "End",
         Save_Settings_Key = "Home",
-        Window_Size = {X = 700, Y = 500},
+        Window_Size = {X = 750, Y = 550},
 
         Compact_Minimize = true,
-        Compact_Width = 150,
+        Compact_Width = 180,
     },
 }
 
@@ -266,207 +253,6 @@ end
 loadSettings()
 
 --========================================================
--- RECOIL
---========================================================
-
-local RecoilOriginals = setmetatable({}, {__mode = "k"})
-local RecoilFolderConnection = nil
-
-local function getRecoilFolder()
-    return ReplicatedStorage:FindFirstChild("AmmoTypes")
-end
-
-local function rememberRecoilValue(object)
-    if RecoilOriginals[object] ~= nil then
-        return
-    end
-
-    local value = object:GetAttribute("RecoilStrength")
-
-    if value ~= nil then
-        RecoilOriginals[object] = value
-    end
-end
-
-local function applyRecoilToObject(object)
-    local current = object:GetAttribute("RecoilStrength")
-
-    if current == nil and RecoilOriginals[object] == nil then
-        return
-    end
-
-    rememberRecoilValue(object)
-
-    local original = RecoilOriginals[object]
-
-    if original == nil then
-        return
-    end
-
-    if not RCX.COMBAT.Recoil_Modifier then
-        pcall(function()
-            object:SetAttribute("RecoilStrength", original)
-        end)
-        return
-    end
-
-    local numericOriginal = tonumber(original)
-
-    if numericOriginal then
-        local modified =
-            numericOriginal
-            * clamp(RCX.COMBAT.Recoil_Percent, 0, 100)
-            / 100
-
-        pcall(function()
-            object:SetAttribute("RecoilStrength", modified)
-        end)
-    elseif RCX.COMBAT.Recoil_Percent <= 0 then
-        -- Compatibilidad con juegos que guardan este atributo como texto.
-        pcall(function()
-            object:SetAttribute("RecoilStrength", "0")
-        end)
-    end
-end
-
-local function applyRecoilSettings()
-    local folder = getRecoilFolder()
-
-    if not folder then
-        return
-    end
-
-    applyRecoilToObject(folder)
-
-    for _, object in ipairs(folder:GetDescendants()) do
-        applyRecoilToObject(object)
-    end
-end
-
-local function restoreRecoil()
-    for object, original in pairs(RecoilOriginals) do
-        if object and object.Parent then
-            pcall(function()
-                object:SetAttribute("RecoilStrength", original)
-            end)
-        end
-    end
-end
-
-local function setupRecoilWatcher()
-    local folder = getRecoilFolder()
-
-    if not folder then
-        return
-    end
-
-    if RecoilFolderConnection and RecoilFolderConnection.Connected then
-        RecoilFolderConnection:Disconnect()
-    end
-
-    RecoilFolderConnection = folder.DescendantAdded:Connect(function(object)
-        task.defer(function()
-            if not DESTROY then
-                applyRecoilToObject(object)
-            end
-        end)
-    end)
-
-    applyRecoilSettings()
-end
-
-setupRecoilWatcher()
-
---========================================================
--- ZOOM DE CÁMARA
---========================================================
-
-local ZoomActive = false
-local ZoomRestoreFOV = nil
-local ZoomInputBeganConnection = nil
-local ZoomInputEndedConnection = nil
-local ZoomCameraConnection = nil
-
-local function getZoomKeyCode()
-    return Enum.KeyCode[RCX.CAMERA.Zoom_Key] or Enum.KeyCode.C
-end
-
-local function setZoomState(enabled)
-    local camera = Workspace.CurrentCamera
-
-    if not camera then
-        ZoomActive = false
-        return
-    end
-
-    if enabled then
-        if not RCX.CAMERA.Zoom then
-            return
-        end
-
-        if not ZoomActive then
-            ZoomRestoreFOV = camera.FieldOfView
-        end
-
-        ZoomActive = true
-        camera.FieldOfView = clamp(RCX.CAMERA.Zoom_FOV, 1, 120)
-    else
-        if ZoomActive and ZoomRestoreFOV then
-            camera.FieldOfView = ZoomRestoreFOV
-        end
-
-        ZoomActive = false
-        ZoomRestoreFOV = nil
-    end
-end
-
-ZoomInputBeganConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if DESTROY or gameProcessed or not RCX.CAMERA.Zoom then
-        return
-    end
-
-    if input.UserInputType ~= Enum.UserInputType.Keyboard then
-        return
-    end
-
-    if input.KeyCode ~= getZoomKeyCode() then
-        return
-    end
-
-    if RCX.CAMERA.Zoom_Mode == "Toggle" then
-        setZoomState(not ZoomActive)
-    else
-        setZoomState(true)
-    end
-end)
-
-ZoomInputEndedConnection = UserInputService.InputEnded:Connect(function(input)
-    if DESTROY or RCX.CAMERA.Zoom_Mode ~= "Hold" then
-        return
-    end
-
-    if input.UserInputType == Enum.UserInputType.Keyboard
-        and input.KeyCode == getZoomKeyCode()
-    then
-        setZoomState(false)
-    end
-end)
-
-ZoomCameraConnection =
-    Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-        if ZoomActive then
-            task.defer(function()
-                local camera = Workspace.CurrentCamera
-
-                if camera then
-                    camera.FieldOfView =
-                        clamp(RCX.CAMERA.Zoom_FOV, 1, 120)
-                end
-            end)
-        end
-    end)
-
---========================================================
 -- RENDIMIENTO / TERRENO
 --========================================================
 
@@ -506,23 +292,6 @@ end
 applyGrassSetting()
 
 --========================================================
--- ILUMINACIÓN
---========================================================
-
-local OriginalBrightness = Lighting.Brightness
-
-local function applyBrightnessSetting()
-    if RCX.PERFORMANCE.Brightness_Override then
-        Lighting.Brightness =
-            clamp(RCX.PERFORMANCE.Brightness, 0, 10)
-    else
-        Lighting.Brightness = OriginalBrightness
-    end
-end
-
-applyBrightnessSetting()
-
---========================================================
 -- INTERFAZ
 --========================================================
 
@@ -542,6 +311,37 @@ local RCX_Window = Library.NewWindow("RSWA", {
         DESTROY = true
     end,
 })
+
+local function applyRSWABranding()
+    local menuGui = CoreGui:FindFirstChild("RSWA")
+
+    if not menuGui then
+        return
+    end
+
+    local mainWindow = menuGui:FindFirstChild("Main_Window")
+
+    if not mainWindow then
+        return
+    end
+
+    local credits = mainWindow:FindFirstChild("Credits")
+    local topBar = mainWindow:FindFirstChild("Top_Bar")
+
+    if credits then
+        credits.Text = "RSWA"
+    end
+
+    if topBar then
+        local title = topBar:FindFirstChild("Top_Bar_Title")
+
+        if title then
+            title.Text = "RSWA"
+        end
+    end
+end
+
+task.defer(applyRSWABranding)
 
 --========================================================
 -- MINIMIZADO COMPACTO
@@ -574,8 +374,6 @@ local function setupCompactMinimize()
     local credits = mainWindow:FindFirstChild("Credits")
 
     local compact = false
-    local fullWidth = mainWindow.AbsoluteSize.X
-    local fullHeight = mainWindow.AbsoluteSize.Y
 
     local function setBodyVisible(visible)
         if pageHolder then
@@ -594,47 +392,34 @@ local function setupCompactMinimize()
     minimizeButton.MouseButton1Click:Connect(function()
         if not RCX.UI.Compact_Minimize then
             compact = false
+            setBodyVisible(true)
             return
         end
 
-        task.defer(function()
-            compact = not compact
+        compact = not compact
+
+        -- La librería ya anima la altura de la ventana.
+        -- Esperamos a que termine para no competir con su Tween.
+        task.delay(0.22, function()
+            if DESTROY or not mainWindow.Parent then
+                return
+            end
 
             if compact then
-                fullWidth = math.max(mainWindow.AbsoluteSize.X, RCX.UI.Window_Size.X)
-                fullHeight = math.max(mainWindow.AbsoluteSize.Y, RCX.UI.Window_Size.Y)
-
                 setBodyVisible(false)
 
-                TweenService:Create(
-                    mainWindow,
-                    TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-                    {
-                        Size = UDim2.fromOffset(
-                            RCX.UI.Compact_Width,
-                            30
-                        )
-                    }
-                ):Play()
+                mainWindow.Size = UDim2.fromOffset(
+                    RCX.UI.Compact_Width,
+                    30
+                )
             else
                 setBodyVisible(true)
-
-                TweenService:Create(
-                    mainWindow,
-                    TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-                    {
-                        Size = UDim2.fromOffset(
-                            fullWidth,
-                            fullHeight
-                        )
-                    }
-                ):Play()
             end
         end)
     end)
 end
-
 task.defer(setupCompactMinimize)
+task.delay(0.1, applyRSWABranding)
 
 
 -- VISUALS
@@ -758,26 +543,36 @@ end, {
     default = RCX.ESP.Distance,
 })
 
-PLR_INFO_Category.NewToggle("Inventory", function(value)
-    RCX.ESP.Inventory = value
+PLR_INFO_Category.NewToggle("Head Dot", function(value)
+    RCX.ESP.Head_Dot = value
 end, {
-    default = RCX.ESP.Inventory,
+    default = RCX.ESP.Head_Dot,
 })
 
-PLR_INFO_Category.NewToggle("Show Equipped Tool", function(value)
-    RCX.ESP.Inventory_Equipped = value
+PLR_INFO_Category.NewToggle("Distance Fade", function(value)
+    RCX.ESP.Fade = value
 end, {
-    default = RCX.ESP.Inventory_Equipped,
+    default = RCX.ESP.Fade,
 })
 
-PLR_INFO_Category.NewSlider("Inventory Item Limit", function(value)
-    RCX.ESP.Inventory_Max_Items = value
+PLR_INFO_Category.NewSlider("Text Size", function(value)
+    RCX.ESP.Text_Size = value
 end, {
-    default = RCX.ESP.Inventory_Max_Items,
-    min = 1,
-    max = 15,
+    default = RCX.ESP.Text_Size,
+    min = 10,
+    max = 20,
     decimals = 0,
-    suffix = " items",
+    suffix = " px",
+})
+
+PLR_INFO_Category.NewSlider("Dot Size", function(value)
+    RCX.ESP.Dot_Size = value
+end, {
+    default = RCX.ESP.Dot_Size,
+    min = 2,
+    max = 9,
+    decimals = 0,
+    suffix = " px",
 })
 
 local BOXES_Category = ESP_Page.NewCategory("Boxes")
@@ -1049,78 +844,107 @@ do
     })
 end
 
--- COMBAT / CAMERA
-local COMBAT_Page = RCX_Window.NewPage("Combat")
 
-local WEAPON_Category = COMBAT_Page.NewCategory("Weapon")
+local IGNORE_AIMBOT_Category = AIMBOT_Page.NewCategory("Ignore Players")
 
-WEAPON_Category.NewToggle("Recoil Modifier", function(value)
-    RCX.COMBAT.Recoil_Modifier = value
-    applyRecoilSettings()
-end, {
-    default = RCX.COMBAT.Recoil_Modifier,
-})
+IGNORE_AIMBOT_Category.NewButton("Clear Ignore List", function()
+    RCX.AIMBOT.Ignore_Players = ""
 
-WEAPON_Category.NewSlider("Recoil", function(value)
-    RCX.COMBAT.Recoil_Percent = value
-    applyRecoilSettings()
-end, {
-    default = RCX.COMBAT.Recoil_Percent,
-    min = 0,
-    max = 100,
-    decimals = 0,
-    suffix = "%",
-})
+    local menuGui = CoreGui:FindFirstChild("RSWA")
 
-local CAMERA_Category = COMBAT_Page.NewCategory("Camera")
-
-CAMERA_Category.NewToggle("Zoom", function(value)
-    RCX.CAMERA.Zoom = value
-
-    if not value then
-        setZoomState(false)
+    if not menuGui then
+        return
     end
-end, {
-    default = RCX.CAMERA.Zoom,
-})
 
-CAMERA_Category.NewKeybind("Zoom Key", function()
-end, function(newKey)
-    RCX.CAMERA.Zoom_Key =
-        tostring(newKey):gsub("Enum.KeyCode.", "")
-end, {
-    default = Enum.KeyCode[RCX.CAMERA.Zoom_Key] or Enum.KeyCode.C,
-})
+    local mainWindow = menuGui:FindFirstChild("Main_Window")
+    local pages = mainWindow and mainWindow:FindFirstChild("Pages")
+    local aimbotPage = pages and pages:FindFirstChild("Aimbot")
+    local category = aimbotPage and aimbotPage:FindFirstChild("Ignore Players")
+    local categoryBackground =
+        category and category:FindFirstChild("Category_Background")
 
-do
-    local options = {"Hold", "Toggle"}
-    local defaultOption = table.find(options, RCX.CAMERA.Zoom_Mode) or 1
+    local holder =
+        categoryBackground
+        and categoryBackground:FindFirstChild("Options_Holder")
 
-    CAMERA_Category.NewDropdown("Zoom Mode", function(option)
-        if ZoomActive then
-            setZoomState(false)
-        end
+    local row = holder and holder:FindFirstChild("Ignored Player Names")
+    local input = row and row:FindFirstChild("Input")
 
-        RCX.CAMERA.Zoom_Mode = option
-    end, {
-        options = options,
-        default = defaultOption,
-    })
+    if input then
+        input.Text = ""
+    end
+end)
+
+local function createIgnorePlayerInput()
+    local menuGui = CoreGui:FindFirstChild("RSWA")
+
+    if not menuGui then
+        return
+    end
+
+    local mainWindow = menuGui:FindFirstChild("Main_Window")
+    local pages = mainWindow and mainWindow:FindFirstChild("Pages")
+    local aimbotPage = pages and pages:FindFirstChild("Aimbot")
+    local category = aimbotPage and aimbotPage:FindFirstChild("Ignore Players")
+    local categoryBackground =
+        category and category:FindFirstChild("Category_Background")
+
+    local holder =
+        categoryBackground
+        and categoryBackground:FindFirstChild("Options_Holder")
+
+    if not holder or holder:FindFirstChild("Ignored Player Names") then
+        return
+    end
+
+    local row = Instance.new("Frame")
+    row.Name = "Ignored Player Names"
+    row.Parent = holder
+    row.BackgroundTransparency = 1
+    row.Size = UDim2.new(1, 0, 0, 34)
+    row.ZIndex = 4
+
+    local label = Instance.new("TextLabel")
+    label.Name = "Title"
+    label.Parent = row
+    label.BackgroundTransparency = 1
+    label.Position = UDim2.new(0, 10, 0, 0)
+    label.Size = UDim2.new(0.36, -5, 1, 0)
+    label.Font = Enum.Font.SourceSans
+    label.Text = "Ignored names"
+    label.TextColor3 = RGB(207, 207, 222)
+    label.TextSize = 14
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.ZIndex = 5
+
+    local input = Instance.new("TextBox")
+    input.Name = "Input"
+    input.Parent = row
+    input.BackgroundColor3 = RGB(25, 26, 36)
+    input.BorderColor3 = RGB(58, 58, 85)
+    input.Position = UDim2.new(0.36, 0, 0.5, -11)
+    input.Size = UDim2.new(0.64, -10, 0, 22)
+    input.Font = Enum.Font.SourceSans
+    input.PlaceholderText = "Name1, Name2..."
+    input.PlaceholderColor3 = RGB(130, 132, 150)
+    input.Text = RCX.AIMBOT.Ignore_Players or ""
+    input.TextColor3 = RGB(238, 238, 255)
+    input.TextSize = 13
+    input.ClearTextOnFocus = false
+    input.TextXAlignment = Enum.TextXAlignment.Left
+    input.ZIndex = 5
+
+    input:GetPropertyChangedSignal("Text"):Connect(function()
+        RCX.AIMBOT.Ignore_Players = input.Text
+    end)
+
+    input.FocusLost:Connect(function()
+        RCX.AIMBOT.Ignore_Players =
+            input.Text:gsub("^%s+", ""):gsub("%s+$", "")
+    end)
 end
 
-CAMERA_Category.NewSlider("Zoom FOV", function(value)
-    RCX.CAMERA.Zoom_FOV = value
-
-    if ZoomActive and Workspace.CurrentCamera then
-        Workspace.CurrentCamera.FieldOfView = value
-    end
-end, {
-    default = RCX.CAMERA.Zoom_FOV,
-    min = 5,
-    max = 90,
-    decimals = 0,
-    suffix = "°",
-})
+task.defer(createIgnorePlayerInput)
 
 -- PERFORMANCE
 local PERFORMANCE_Page = RCX_Window.NewPage("Performance")
@@ -1132,27 +956,6 @@ WORLD_PERFORMANCE_Category.NewToggle("Remove Grass", function(value)
     applyGrassSetting()
 end, {
     default = RCX.PERFORMANCE.Remove_Grass,
-})
-
-WORLD_PERFORMANCE_Category.NewToggle("Brightness Override", function(value)
-    RCX.PERFORMANCE.Brightness_Override = value
-    applyBrightnessSetting()
-end, {
-    default = RCX.PERFORMANCE.Brightness_Override,
-})
-
-WORLD_PERFORMANCE_Category.NewSlider("Brightness", function(value)
-    RCX.PERFORMANCE.Brightness = value
-
-    if RCX.PERFORMANCE.Brightness_Override then
-        applyBrightnessSetting()
-    end
-end, {
-    default = RCX.PERFORMANCE.Brightness,
-    min = 0,
-    max = 10,
-    decimals = 1,
-    suffix = "",
 })
 
 local INTERFACE_PERFORMANCE_Category = PERFORMANCE_Page.NewCategory("Interface")
@@ -1167,8 +970,8 @@ INTERFACE_PERFORMANCE_Category.NewSlider("Compact Width", function(value)
     RCX.UI.Compact_Width = value
 end, {
     default = RCX.UI.Compact_Width,
-    min = 120,
-    max = 260,
+    min = 140,
+    max = 300,
     decimals = 0,
     suffix = " px",
 })
@@ -1193,20 +996,12 @@ end, {
     default = Enum.KeyCode[RCX.UI.Save_Settings_Key],
 })
 
-local ABOUT_SETTINGS_Category = SETTINGS_Page.NewCategory("RSWA")
-
-ABOUT_SETTINGS_Category.NewButton("Restore Default Window Size", function()
-    RCX.UI.Window_Size = {
-        X = 700,
-        Y = 500,
-    }
-end)
-
 --========================================================
 -- ESTADO COMPARTIDO
 --========================================================
 
 local Aiming = false
+local AimActivation = nil
 local random_part = 0
 local Selected_Player = nil
 
@@ -1252,68 +1047,49 @@ local function getHumanoid(character)
     return character:FindFirstChildOfClass("Humanoid")
 end
 
-local function getVisibleInventory(player, character)
-    local names = {}
-    local seen = {}
-    local maxItems = math.max(1, RCX.ESP.Inventory_Max_Items)
-
-    local function addTool(tool, equipped)
-        if not tool:IsA("Tool") then
-            return
-        end
-
-        local key = tool.Name
-
-        if seen[key] then
-            return
-        end
-
-        seen[key] = true
-
-        if equipped then
-            table.insert(names, "★ " .. tool.Name)
-        else
-            table.insert(names, tool.Name)
-        end
-    end
-
-    if RCX.ESP.Inventory_Equipped and character then
-        for _, object in ipairs(character:GetChildren()) do
-            addTool(object, true)
-
-            if #names >= maxItems then
-                return names, false
-            end
-        end
-    end
-
-    local backpack = player and player:FindFirstChildOfClass("Backpack")
-
-    if backpack then
-        local totalTools = 0
-
-        for _, object in ipairs(backpack:GetChildren()) do
-            if object:IsA("Tool") then
-                totalTools = totalTools + 1
-
-                if #names < maxItems then
-                    addTool(object, false)
-                end
-            end
-        end
-
-        return names, totalTools <= maxItems
-    end
-
-    return names, true
-end
-
 local function sameTeam(player)
     if not RCX.AIMBOT.Team_Check then
         return false
     end
 
     return player.TeamColor == LocalPlayer.TeamColor
+end
+
+
+local function getIgnoredPlayerSet()
+    local ignored = {}
+    local source = RCX.AIMBOT.Ignore_Players or ""
+
+    for name in source:gmatch("[^,;\n]+") do
+        local clean =
+            name:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+
+        if clean ~= "" then
+            ignored[clean] = true
+        end
+    end
+
+    return ignored
+end
+
+local function isAimbotIgnored(player)
+    if not player then
+        return false
+    end
+
+    local ignored = getIgnoredPlayerSet()
+
+    if ignored[player.Name:lower()] then
+        return true
+    end
+
+    if player.DisplayName
+        and ignored[player.DisplayName:lower()]
+    then
+        return true
+    end
+
+    return false
 end
 
 local function espColorFor(player, character)
@@ -1369,6 +1145,19 @@ end
 
 local function hideDrawing(drawings)
     drawings.info.Visible = false
+
+    if drawings.status then
+        drawings.status.Visible = false
+    end
+
+    if drawings.dotOutline then
+        drawings.dotOutline.Visible = false
+    end
+
+    if drawings.dot then
+        drawings.dot.Visible = false
+    end
+
     drawings.bar.Visible = false
     drawings.healthBar.Visible = false
     drawings.tracer.Visible = false
@@ -1393,7 +1182,9 @@ local aimInputEnded
 
 aimInputBegan = UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if DESTROY then
-        aimInputBegan:Disconnect()
+        if aimInputBegan and aimInputBegan.Connected then
+            aimInputBegan:Disconnect()
+        end
         return
     end
 
@@ -1406,32 +1197,44 @@ aimInputBegan = UserInputService.InputBegan:Connect(function(input, gameProcesse
         and input.KeyCode == Enum.KeyCode[RCX.AIMBOT.Aim_Key]
     then
         random_part = random(1, 3)
+        AimActivation = "Key"
         Aiming = true
     elseif RCX.AIMBOT.Aim_Mode == "Mouse"
         and input.UserInputType == Enum.UserInputType.MouseButton2
     then
         random_part = random(1, 3)
+        AimActivation = "Mouse"
         Aiming = true
     end
 end)
 
 aimInputEnded = UserInputService.InputEnded:Connect(function(input)
     if DESTROY then
-        aimInputEnded:Disconnect()
+        if aimInputEnded and aimInputEnded.Connected then
+            aimInputEnded:Disconnect()
+        end
+
+        AimActivation = nil
         Aiming = false
         return
     end
 
-    if RCX.AIMBOT.Aim_Mode == "Key"
+    local releasedActivation = false
+
+    if AimActivation == "Key"
         and input.UserInputType == Enum.UserInputType.Keyboard
         and input.KeyCode == Enum.KeyCode[RCX.AIMBOT.Aim_Key]
     then
-        random_part = 0
-        Aiming = false
-    elseif RCX.AIMBOT.Aim_Mode == "Mouse"
+        releasedActivation = true
+    elseif AimActivation == "Mouse"
         and input.UserInputType == Enum.UserInputType.MouseButton2
     then
+        releasedActivation = true
+    end
+
+    if releasedActivation then
         random_part = 0
+        AimActivation = nil
         Aiming = false
     end
 end)
@@ -1488,7 +1291,10 @@ local function getClosestTarget()
     local closestDistance = huge
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and not sameTeam(player) then
+        if player ~= LocalPlayer
+            and not sameTeam(player)
+            and not isAimbotIgnored(player)
+        then
             local character = getCharacter(player)
             local humanoid = getHumanoid(character)
             local rootPart = getRootPart(character)
@@ -1549,6 +1355,19 @@ local function removeESP(player)
     end
 
     data.info:Remove()
+
+    if data.status then
+        data.status:Remove()
+    end
+
+    if data.dotOutline then
+        data.dotOutline:Remove()
+    end
+
+    if data.dot then
+        data.dot:Remove()
+    end
+
     data.bar:Remove()
     data.healthBar:Remove()
     data.tracer:Remove()
@@ -1568,6 +1387,28 @@ local function addESP(player)
     local drawings = {
         info = ESP_API.NewText({
             Center = true,
+            Outline = true,
+            Size = RCX.ESP.Text_Size,
+        }),
+
+        status = ESP_API.NewText({
+            Center = true,
+            Outline = true,
+            Size = math.max(RCX.ESP.Text_Size - 1, 9),
+        }),
+
+        dotOutline = ESP_API.NewCircle({
+            Color = RGB(0, 0, 0),
+            Filled = false,
+            Radius = RCX.ESP.Dot_Size + 2,
+            NumSides = 24,
+            Thickness = 2,
+        }),
+
+        dot = ESP_API.NewCircle({
+            Filled = true,
+            Radius = RCX.ESP.Dot_Size,
+            NumSides = 24,
         }),
 
         bar = ESP_API.NewLine({
@@ -1691,11 +1532,71 @@ local function addESP(player)
 
         local currentColor = espColorFor(player, character)
 
+        local visualTransparency = 1
+
+        if RCX.ESP.Fade then
+            visualTransparency = clamp(
+                1 - (
+                    distance
+                    / math.max(
+                        math.max(
+                            RCX.ESP.Max_Info_Distance,
+                            RCX.ESP.Boxes_Distance,
+                            RCX.ESP.Health_Bar_Distance,
+                            RCX.ESP.View_Tracer_Distance
+                        ),
+                        1
+                    )
+                ) * 0.55,
+                0.4,
+                1
+            )
+        end
+
         drawings.info.Color = currentColor
+        drawings.info.Size = RCX.ESP.Text_Size
+        drawings.info.Transparency = visualTransparency
+
+        drawings.status.Color = RGB(230, 230, 235)
+        drawings.status.Size = math.max(RCX.ESP.Text_Size - 1, 9)
+        drawings.status.Transparency = visualTransparency
+
         drawings.tracer.Color = currentColor
+        drawings.tracer.Transparency = visualTransparency
+
+        drawings.dot.Color = currentColor
+        drawings.dot.Radius = RCX.ESP.Dot_Size
+        drawings.dot.Transparency = visualTransparency
+
+        drawings.dotOutline.Radius = RCX.ESP.Dot_Size + 2
+        drawings.dotOutline.Transparency = visualTransparency
 
         for _, line in ipairs(drawings.boxLines) do
             line.Color = currentColor
+            line.Transparency = visualTransparency
+        end
+
+        local head = character:FindFirstChild("Head")
+
+        if RCX.ESP.Head_Dot and head and head:IsA("BasePart") then
+            local headScreen, headVisible =
+                camera:WorldToViewportPoint(head.Position)
+
+            local showHeadDot =
+                headVisible and headScreen.Z > 0
+
+            if showHeadDot then
+                drawings.dot.Position =
+                    V2(headScreen.X, headScreen.Y)
+                drawings.dotOutline.Position =
+                    V2(headScreen.X, headScreen.Y)
+            end
+
+            drawings.dot.Visible = showHeadDot
+            drawings.dotOutline.Visible = showHeadDot
+        else
+            drawings.dot.Visible = false
+            drawings.dotOutline.Visible = false
         end
 
         local ratio = 2500 / rootPosition.Z
@@ -1705,44 +1606,57 @@ local function addESP(player)
         local rootX = rootPosition.X
         local rootY = rootPosition.Y
 
-        if RCX.ESP.Boxes and distance < RCX.ESP.Boxes_Distance then
-            local topLeft = V2(rootX - halfWidth, rootY - halfHeight)
-            local topRight = V2(rootX + halfWidth, rootY - halfHeight)
-            local bottomLeft = V2(rootX - halfWidth, rootY + halfHeight)
-            local bottomRight = V2(rootX + halfWidth, rootY + halfHeight)
+        local topLeft = V2(rootX - halfWidth, rootY - halfHeight)
+        local topRight = V2(rootX + halfWidth, rootY - halfHeight)
+        local bottomLeft = V2(rootX - halfWidth, rootY + halfHeight)
+        local bottomRight = V2(rootX + halfWidth, rootY + halfHeight)
 
-            if RCX.ESP.Health_Bar and distance < RCX.ESP.Health_Bar_Distance then
-                local healthRatio = clamp(humanoid.Health / humanoid.MaxHealth, 0, 1)
-                local offsetX = clamp(round(200 / rootPosition.Z), 4, 8)
+        if RCX.ESP.Health_Bar
+            and distance < RCX.ESP.Health_Bar_Distance
+        then
+            local healthRatio = clamp(
+                humanoid.Health / math.max(humanoid.MaxHealth, 1),
+                0,
+                1
+            )
 
-                local right = rootX + halfWidth
-                local top = rootY - halfHeight
-                local bottom = rootY + halfHeight
-                local barX = right + offsetX
+            local offsetX = clamp(round(200 / rootPosition.Z), 4, 8)
+            local right = rootX + halfWidth
+            local top = rootY - halfHeight
+            local bottom = rootY + halfHeight
+            local barX = right + offsetX
 
-                drawings.bar.From = V2(barX, top)
-                drawings.bar.To = V2(barX, bottom)
+            drawings.bar.From = V2(barX, top)
+            drawings.bar.To = V2(barX, bottom)
 
-                local length = abs((bottom - 1) - (top + 1))
-                local healthLength = length * healthRatio
+            local length = abs((bottom - 1) - (top + 1))
+            local healthLength = length * healthRatio
 
-                drawings.healthBar.From = V2(barX, bottom - 1 - healthLength)
-                drawings.healthBar.To = V2(barX, bottom - 1)
+            drawings.healthBar.From =
+                V2(barX, bottom - 1 - healthLength)
+            drawings.healthBar.To =
+                V2(barX, bottom - 1)
 
-                if humanoid.Health ~= previousHealth then
-                    drawings.healthBar.Color =
-                        RGB(255, 0, 0):Lerp(RGB(0, 255, 0), healthRatio)
+            if humanoid.Health ~= previousHealth then
+                drawings.healthBar.Color =
+                    RGB(255, 0, 0):Lerp(
+                        RGB(0, 255, 0),
+                        healthRatio
+                    )
 
-                    previousHealth = humanoid.Health
-                end
-
-                drawings.bar.Visible = true
-                drawings.healthBar.Visible = true
-            else
-                drawings.bar.Visible = false
-                drawings.healthBar.Visible = false
+                previousHealth = humanoid.Health
             end
 
+            drawings.bar.Visible = true
+            drawings.healthBar.Visible = true
+        else
+            drawings.bar.Visible = false
+            drawings.healthBar.Visible = false
+        end
+
+        if RCX.ESP.Boxes
+            and distance < RCX.ESP.Boxes_Distance
+        then
             if RCX.ESP.Boxes_Mode == "Corners" then
                 local horizontal = V2(ratio / 4, 0)
                 local vertical = V2(0, ratio / 4)
@@ -1788,14 +1702,10 @@ local function addESP(player)
                 setBoxVisibility(drawings.boxLines, true, 4)
             end
         else
-            drawings.bar.Visible = false
-            drawings.healthBar.Visible = false
             setBoxVisibility(drawings.boxLines, false, 0)
         end
 
-        if (RCX.ESP.Info or RCX.ESP.Inventory)
-            and distance < RCX.ESP.Max_Info_Distance
-        then
+        if RCX.ESP.Info and distance < RCX.ESP.Max_Info_Distance then
             local showInfo = true
 
             if RCX.ESP.Hover_Info then
@@ -1808,79 +1718,72 @@ local function addESP(player)
             end
 
             if showInfo then
-                local lines = {}
-                local parts = {}
+                local topY = rootY - halfHeight
+                local bottomY = rootY + halfHeight
 
-                if RCX.ESP.Info then
-                    if RCX.ESP.Health then
-                        table.insert(
-                            parts,
-                            tostring(
-                                round(
-                                    humanoid.Health
-                                    / math.max(humanoid.MaxHealth, 1)
-                                    * 100
-                                )
-                            ) .. "%"
-                        )
+                if RCX.ESP.Names then
+                    drawings.info.Text = player.Name
+
+                    if player.DisplayName
+                        and player.DisplayName ~= player.Name
+                    then
+                        drawings.info.Text =
+                            player.DisplayName
+                            .. "  ["
+                            .. player.Name
+                            .. "]"
                     end
 
-                    if RCX.ESP.Names then
-                        table.insert(parts, player.Name)
-                    end
+                    drawings.info.Position =
+                        V2(rootX, topY - drawings.info.TextBounds.Y - 2)
 
-                    if RCX.ESP.Distance then
-                        table.insert(
-                            parts,
-                            "(" .. tostring(round(distance)) .. ")"
-                        )
-                    end
+                    drawings.info.Visible = true
+                else
+                    drawings.info.Visible = false
                 end
 
-                if #parts > 0 then
-                    table.insert(lines, table.concat(parts, " "))
-                end
+                local statusParts = {}
 
-                if RCX.ESP.Inventory then
-                    local inventory, complete =
-                        getVisibleInventory(player, character)
-
-                    if #inventory > 0 then
-                        local inventoryText =
-                            "INV: " .. table.concat(inventory, ", ")
-
-                        if not complete then
-                            inventoryText = inventoryText .. ", ..."
-                        end
-
-                        table.insert(lines, inventoryText)
-                    else
-                        table.insert(lines, "INV: empty / not replicated")
-                    end
-                end
-
-                drawings.info.Text = table.concat(lines, "\n")
-                drawings.info.Position =
-                    V2(
-                        rootX,
-                        rootY
-                            - halfHeight
-                            - drawings.info.TextBounds.Y
-                            - 2
+                if RCX.ESP.Health then
+                    table.insert(
+                        statusParts,
+                        tostring(
+                            round(
+                                humanoid.Health
+                                / math.max(humanoid.MaxHealth, 1)
+                                * 100
+                            )
+                        ) .. "%"
                     )
+                end
 
-                drawings.info.Visible = #lines > 0
+                if RCX.ESP.Distance then
+                    table.insert(
+                        statusParts,
+                        tostring(round(distance)) .. " studs"
+                    )
+                end
+
+                drawings.status.Text =
+                    table.concat(statusParts, "  •  ")
+
+                drawings.status.Position =
+                    V2(rootX, bottomY + 3)
+
+                drawings.status.Visible = #statusParts > 0
 
                 setHumanoidNameHidden(
                     humanoid,
-                    drawings.info.Visible and RCX.ESP.Names
+                    drawings.info.Visible
                 )
             else
                 drawings.info.Visible = false
+                drawings.status.Visible = false
                 setHumanoidNameHidden(humanoid, false)
             end
         else
             drawings.info.Visible = false
+            drawings.status.Visible = false
             setHumanoidNameHidden(humanoid, false)
         end
     end)
@@ -1991,9 +1894,10 @@ local function addAIESP(model)
 
         dotOutline = ESP_API.NewCircle({
             Color = RGB(0, 0, 0),
-            Filled = true,
+            Filled = false,
             Radius = RCX.AI_ESP.Dot_Size + 2,
             NumSides = 24,
+            Thickness = 2,
         }),
 
         dot = ESP_API.NewCircle({
@@ -2023,7 +1927,7 @@ local function addAIESP(model)
 
     for index = 1, 8 do
         data.boxLines[index] = ESP_API.NewLine({
-            Thickness = 1,
+            Thickness = 1.25,
         })
     end
 
@@ -2077,6 +1981,14 @@ local function getModelScreenBounds(model, camera)
     local height = maxY - minY
 
     if width < 2 or height < 2 then
+        return nil
+    end
+
+    local viewport = camera.ViewportSize
+
+    if width > viewport.X * 0.9
+        or height > viewport.Y * 0.95
+    then
         return nil
     end
 
@@ -2202,7 +2114,7 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
     local modelsToRemove = {}
 
     for model, data in pairs(ActiveAIESP) do
-        if not model.Parent then
+        if not model.Parent or Players:GetPlayerFromCharacter(model) then
             table.insert(modelsToRemove, model)
         else
             local humanoid = model:FindFirstChildOfClass("Humanoid")
@@ -2211,9 +2123,11 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
 
             if not humanoid
                 or not head
+                or not head:IsA("BasePart")
                 or not rootPart
-                or humanoid.Health <= 0
             then
+                hideAIESP(data)
+            elseif humanoid.Health <= 0 then
                 hideAIESP(data)
             else
                 local distance = (rootPart.Position - localRoot.Position).Magnitude
@@ -2256,7 +2170,7 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                             data.statusText.Color = RGB(230, 230, 230)
 
                             if RCX.AI_ESP.Names then
-                                data.nameText.Text = "[AI] " .. model.Name
+                                data.nameText.Text = model.Name
                                 data.nameText.Position =
                                     V2((minX + maxX) * 0.5, minY - 18)
                                 data.nameText.Visible = true
@@ -2292,11 +2206,16 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                                 )
                             end
 
-                            data.statusText.Text =
-                                table.concat(statusParts, "  •  ")
+                            if #statusParts > 0 then
+                                data.statusText.Text =
+                                    "AI  •  "
+                                    .. table.concat(statusParts, "  •  ")
+                            else
+                                data.statusText.Text = "AI"
+                            end
                             data.statusText.Position =
                                 V2((minX + maxX) * 0.5, maxY + 3)
-                            data.statusText.Visible = #statusParts > 0
+                            data.statusText.Visible = true
 
                             local headScreen, headOnScreen =
                                 camera:WorldToViewportPoint(head.Position)
@@ -2398,28 +2317,10 @@ local aimbotConnection
 aimbotConnection = RunService.RenderStepped:Connect(function()
     if DESTROY then
         Selected_Player = nil
+        AimActivation = nil
         Aiming = false
 
         setTerrainDecoration(OriginalTerrainDecoration)
-        Lighting.Brightness = OriginalBrightness
-        restoreRecoil()
-        setZoomState(false)
-
-        if RecoilFolderConnection and RecoilFolderConnection.Connected then
-            RecoilFolderConnection:Disconnect()
-        end
-
-        if ZoomInputBeganConnection and ZoomInputBeganConnection.Connected then
-            ZoomInputBeganConnection:Disconnect()
-        end
-
-        if ZoomInputEndedConnection and ZoomInputEndedConnection.Connected then
-            ZoomInputEndedConnection:Disconnect()
-        end
-
-        if ZoomCameraConnection and ZoomCameraConnection.Connected then
-            ZoomCameraConnection:Disconnect()
-        end
 
         FOV:Remove()
 
@@ -2457,11 +2358,21 @@ aimbotConnection = RunService.RenderStepped:Connect(function()
 
     if not RCX.AIMBOT.Toggle then
         Selected_Player = nil
+        AimActivation = nil
         Aiming = false
         return
     end
 
     Selected_Player = getClosestTarget()
+
+    if Selected_Player then
+        local selectedPlayer =
+            Players:GetPlayerFromCharacter(Selected_Player)
+
+        if selectedPlayer and isAimbotIgnored(selectedPlayer) then
+            Selected_Player = nil
+        end
+    end
 
     if not Aiming or not Selected_Player then
         return
@@ -2483,8 +2394,10 @@ aimbotConnection = RunService.RenderStepped:Connect(function()
     local screenPosition = camera:WorldToViewportPoint(aimWorldPosition)
     local sensitivity = clamp(1 - RCX.AIMBOT.Smoothness, 0.01, 1) / 1.5
 
-    mousemoverel(
-        (screenPosition.X - Mouse.X) * sensitivity,
-        (screenPosition.Y - Mouse.Y - GuiInset.Y) * sensitivity
-    )
+    if type(mousemoverel) == "function" then
+        mousemoverel(
+            (screenPosition.X - Mouse.X) * sensitivity,
+            (screenPosition.Y - Mouse.Y - GuiInset.Y) * sensitivity
+        )
+    end
 end)
