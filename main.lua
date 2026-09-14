@@ -643,10 +643,11 @@ local RCX = {
         Head_Dot = true,
         Fade = true,
         Show_Bodies = true,
+        Dead_Color = {R = 160, G = 160, B = 160},
         Text_Size = 13,
         Dot_Size = 4,
     },
-AI_ESP = { Toggle = true, Max_Distance = 500, Names = true, Health = true, Distance = true, Head_Dot = true, Boxes = true, Health_Bar = true, Fade = true, Show_Bodies = true, Color = {R = 0, G = 210, B = 255}, Text_Size = 13, Dot_Size = 4, },
+AI_ESP = { Toggle = true, Max_Distance = 500, Names = true, Health = true, Distance = true, Head_Dot = true, Boxes = true, Health_Bar = true, Fade = true, Show_Bodies = true, Color = {R = 0, G = 210, B = 255}, Dead_Color = {R = 160, G = 160, B = 160}, Text_Size = 13, Dot_Size = 4, },
 AIMBOT = { Toggle = false, Bone = "Head", Smoothness = 0.5, Distance_Type = "Mouse", Aim_Key = "Q", Aim_Mode = "Key", Team_Check = false, Ignore_Players = "", FOV = false, FOV_Radius = 50, FOV_Color = {R = 255, G = 255, B = 0}, },
 COMBAT = { Recoil_Modifier = false, Recoil_Percent = 0, },
 CAMERA = { Zoom = true, Zoom_Key = "C", Zoom_Mode = "Hold", Zoom_FOV = 20, },
@@ -964,6 +965,17 @@ end, { default = RCX.ESP.Fade, })
 PLR_INFO_Category.NewToggle("Show Bodies", function(value)
     RCX.ESP.Show_Bodies = value
 end, { default = RCX.ESP.Show_Bodies, })
+
+do
+    local color = RCX.ESP.Dead_Color
+    PLR_INFO_Category.NewColorpicker("Dead Color", function(newColor)
+        RCX.ESP.Dead_Color = {
+            R = newColor.R * 255,
+            G = newColor.G * 255,
+            B = newColor.B * 255,
+        }
+    end, { default = RGB(color.R, color.G, color.B), })
+end
 PLR_INFO_Category.NewSlider("Text Size", function(value)
     RCX.ESP.Text_Size = value
 end, { default = RCX.ESP.Text_Size, min = 10, max = 20, decimals = 0, suffix = " px", })
@@ -1037,6 +1049,17 @@ end, { default = RCX.AI_ESP.Fade, })
 AI_ESP_Category.NewToggle("Show Bodies", function(value)
     RCX.AI_ESP.Show_Bodies = value
 end, { default = RCX.AI_ESP.Show_Bodies, })
+
+do
+    local color = RCX.AI_ESP.Dead_Color
+    AI_ESP_Category.NewColorpicker("Dead Color", function(newColor)
+        RCX.AI_ESP.Dead_Color = {
+            R = newColor.R * 255,
+            G = newColor.G * 255,
+            B = newColor.B * 255,
+        }
+    end, { default = RGB(color.R, color.G, color.B), })
+end
 AI_ESP_Category.NewSlider("Text Size", function(value)
     RCX.AI_ESP.Text_Size = value
 end, { default = RCX.AI_ESP.Text_Size, min = 10, max = 20, decimals = 0, suffix = " px", })
@@ -1572,7 +1595,15 @@ local drawings = { info = ESP_API.NewText({ Center = true, Outline = true, Size 
             restoreHumanoidName()
             return
         end
-        local currentColor = espColorFor(player, character)
+        local currentColor
+        local isDead = humanoid.Health <= 0
+
+        if isDead then
+            local dead = RCX.ESP.Dead_Color
+            currentColor = RGB(dead.R, dead.G, dead.B)
+        else
+            currentColor = espColorFor(player, character)
+        end
         local visualTransparency = 1
         if RCX.ESP.Fade then
             visualTransparency = clamp(
@@ -1665,11 +1696,16 @@ local drawings = { info = ESP_API.NewText({ Center = true, Outline = true, Size 
             drawings.healthBar.To =
                 V2(barX, bottom - 1)
             if humanoid.Health ~= previousHealth then
-                drawings.healthBar.Color =
-                    RGB(255, 0, 0):Lerp(
-                        RGB(0, 255, 0),
-                        healthRatio
-                    )
+                if isDead then
+                    local dead = RCX.ESP.Dead_Color
+                    drawings.healthBar.Color = RGB(dead.R, dead.G, dead.B)
+                else
+                    drawings.healthBar.Color =
+                        RGB(255, 0, 0):Lerp(
+                            RGB(0, 255, 0),
+                            healthRatio
+                        )
+                end
                 previousHealth = humanoid.Health
             end
             drawings.bar.Visible = true
@@ -2010,6 +2046,14 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
             elseif humanoid.Health <= 0 and not RCX.AI_ESP.Show_Bodies then
                 hideAIESP(data)
             else
+                local isDead = humanoid.Health <= 0
+                local currentAIColor = aiColor
+
+                if isDead then
+                    local dead = RCX.AI_ESP.Dead_Color
+                    currentAIColor = RGB(dead.R, dead.G, dead.B)
+                end
+
                 local distance = (rootPart.Position - localRoot.Position).Magnitude
                 if distance > RCX.AI_ESP.Max_Distance then
                     hideAIESP(data)
@@ -2039,7 +2083,7 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                             data.nameText.Size = RCX.AI_ESP.Text_Size
                             data.statusText.Size =
                                 math.max(RCX.AI_ESP.Text_Size - 1, 9)
-                            data.nameText.Color = aiColor
+                            data.nameText.Color = currentAIColor
                             data.statusText.Color = RGB(230, 230, 230)
                             if RCX.AI_ESP.Names then
                                 data.nameText.Text = model.Name
@@ -2093,7 +2137,7 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                                 V2(headScreen.X, headScreen.Y)
                             data.dot.Position =
                                 V2(headScreen.X, headScreen.Y)
-                            data.dot.Color = aiColor
+                            data.dot.Color = currentAIColor
                             local showDot =
                                 RCX.AI_ESP.Head_Dot
                                 and distance <= RCX.AI_ESP.Max_Distance
@@ -2113,7 +2157,7 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                                     maxY
                                 )
                                 for _, line in ipairs(data.boxLines) do
-                                    line.Color = aiColor
+                                    line.Color = currentAIColor
                                     line.Visible = true
                                 end
                             else
@@ -2144,11 +2188,16 @@ aiRenderConnection = RunService.RenderStepped:Connect(function()
                                     )
                                 data.healthBar.To =
                                     V2(barX, barBottom)
-                                data.healthBar.Color =
-                                    RGB(255, 55, 55):Lerp(
-                                        RGB(70, 255, 100),
-                                        healthRatio
-                                    )
+                                if isDead then
+                                    local dead = RCX.AI_ESP.Dead_Color
+                                    data.healthBar.Color = RGB(dead.R, dead.G, dead.B)
+                                else
+                                    data.healthBar.Color =
+                                        RGB(255, 55, 55):Lerp(
+                                            RGB(70, 255, 100),
+                                            healthRatio
+                                        )
+                                end
                                 data.healthBackground.Visible = true
                                 data.healthBar.Visible = true
                             else
