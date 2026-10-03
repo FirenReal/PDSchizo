@@ -11,7 +11,7 @@ local CoreGui = game:GetService("CoreGui")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
--- Ataj
+-- Atajos
 local clamp = math.clamp
 local round = math.round
 local abs = math.abs
@@ -648,7 +648,7 @@ local RCX = {
         Dot_Size = 4,
     },
 AI_ESP = { Toggle = true, Max_Distance = 500, Names = true, Health = true, Distance = true, Head_Dot = true, Boxes = true, Health_Bar = true, Fade = true, Show_Bodies = true, Color = {R = 0, G = 210, B = 255}, Dead_Color = {R = 160, G = 160, B = 160}, Text_Size = 13, Dot_Size = 4, },
-AIMBOT = { Toggle = false, Target_AI = false, Bone = "Head", Smoothness = 0.5, Distance_Type = "Mouse", Aim_Key = "Q", Aim_Mode = "Key", Team_Check = false, Ignore_Players = "", FOV = false, FOV_Radius = 50, FOV_Color = {R = 255, G = 255, B = 0}, },
+AIMBOT = { Toggle = false, Bone = "Head", Smoothness = 0.5, Distance_Type = "Mouse", Aim_Key = "Q", Aim_Mode = "Key", Team_Check = false, Ignore_Players = "", FOV = false, FOV_Radius = 50, FOV_Color = {R = 255, G = 255, B = 0}, },
 COMBAT = { Recoil_Modifier = false, Recoil_Percent = 0, },
 CAMERA = { Zoom = true, Zoom_Key = "C", Zoom_Mode = "Hold", Zoom_FOV = 20, },
 PERFORMANCE = { Remove_Grass = false, },
@@ -1103,9 +1103,6 @@ end
 MAIN_AIMBOT_Category.NewToggle("Team Check", function(value)
     RCX.AIMBOT.Team_Check = value
 end, { default = RCX.AIMBOT.Team_Check, })
-MAIN_AIMBOT_Category.NewToggle("Target AI / NPC", function(value)
-    RCX.AIMBOT.Target_AI = value
-end, { default = RCX.AIMBOT.Target_AI, })
 local FOV_Category = AIMBOT_Page.NewCategory("FOV")
 FOV_Category.NewToggle("Toggle", function(value)
     RCX.AIMBOT.FOV = value
@@ -1255,11 +1252,7 @@ local function getRootPart(character)
     if not character then
         return nil
     end
-    return character:FindFirstChild("HumanoidRootPart")
-        or character:FindFirstChild("UpperTorso")
-        or character:FindFirstChild("Torso")
-        or character.PrimaryPart
-        or character:FindFirstChild("Head")
+    return character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
 end
 local function getHumanoid(character)
     if not character then
@@ -1435,7 +1428,6 @@ local function updateFOV()
     FOV.Radius = RCX.AIMBOT.FOV_Radius
     FOV.Visible = RCX.AIMBOT.FOV
 end
-local ActiveAIESP = {}
 -- Selección de objetivo
 local function getClosestTarget()
     if not RCX.AIMBOT.Toggle then
@@ -1453,80 +1445,39 @@ local function getClosestTarget()
     end
     local closestCharacter = nil
     local closestDistance = huge
-    local function considerTarget(character)
-        if not character then
-            return
-        end
-        local humanoid = getHumanoid(character)
-        local rootPart = getRootPart(character)
-        if not humanoid or humanoid.Health <= 0 or not rootPart then
-            return
-        end
-        local aimWorldPosition = getAimWorldPosition(character, rootPart)
-        if not aimWorldPosition then
-            return
-        end
-        local screenPoint, visible = camera:WorldToViewportPoint(aimWorldPosition)
-        if not isOnViewport(camera, screenPoint, visible) then
-            return
-        end
-        local screenPosition = V2(screenPoint.X, screenPoint.Y)
-        if RCX.AIMBOT.FOV
-            and (screenPosition - FOV.Position).Magnitude > RCX.AIMBOT.FOV_Radius
-        then
-            return
-        end
-        local distance
-        if RCX.AIMBOT.Distance_Type == "Character" then
-            distance = (localRoot.Position - rootPart.Position).Magnitude
-        else
-            distance = (mousePosition - screenPosition).Magnitude
-        end
-        if distance < closestDistance then
-            closestDistance = distance
-            closestCharacter = character
-        end
-    end
-
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer
             and not sameTeam(player)
             and not isAimbotIgnored(player)
         then
-            considerTarget(getCharacter(player))
-        end
-    end
-
-    if RCX.AIMBOT.Target_AI then
-        local seenAI = {}
-
-        for model in pairs(ActiveAIESP) do
-            if model
-                and model.Parent
-                and not Players:GetPlayerFromCharacter(model)
-            then
-                seenAI[model] = true
-                considerTarget(model)
-            end
-        end
-
-        for _, object in ipairs(Workspace:GetDescendants()) do
-            if object:IsA("Humanoid") then
-                local model = object.Parent
-
-                if model
-                    and model:IsA("Model")
-                    and not seenAI[model]
-                    and not Players:GetPlayerFromCharacter(model)
-                    and model:FindFirstChild("Head")
-                then
-                    seenAI[model] = true
-                    considerTarget(model)
+            local character = getCharacter(player)
+            local humanoid = getHumanoid(character)
+            local rootPart = getRootPart(character)
+            if character and humanoid and humanoid.Health > 0 and rootPart then
+                local aimWorldPosition = getAimWorldPosition(character, rootPart)
+                if aimWorldPosition then
+                    local screenPoint, visible = camera:WorldToViewportPoint(aimWorldPosition)
+                    if visible then
+                        local screenPosition = V2(screenPoint.X, screenPoint.Y)
+                        if not RCX.AIMBOT.FOV
+                            or (screenPosition - FOV.Position).Magnitude <= RCX.AIMBOT.FOV_Radius
+                        then
+                            local distance
+                            if RCX.AIMBOT.Distance_Type == "Character" then
+                                distance = (localRoot.Position - rootPart.Position).Magnitude
+                            else
+                                distance = (mousePosition - screenPosition).Magnitude
+                            end
+                            if distance < closestDistance then
+                                closestDistance = distance
+                                closestCharacter = character
+                            end
+                        end
+                    end
                 end
             end
         end
     end
-
     return closestCharacter
 end
 -- ESP de jugadores
@@ -1879,6 +1830,7 @@ local playerAddedConnection = Players.PlayerAdded:Connect(addESP)
 local playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
     removeESP(player)
 end)
+local ActiveAIESP = {}
 local function isAIModel(model)
     if not model or not model:IsA("Model") then
         return false
