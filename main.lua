@@ -1255,7 +1255,11 @@ local function getRootPart(character)
     if not character then
         return nil
     end
-    return character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+    return character:FindFirstChild("HumanoidRootPart")
+        or character:FindFirstChild("UpperTorso")
+        or character:FindFirstChild("Torso")
+        or character.PrimaryPart
+        or character:FindFirstChild("Head")
 end
 local function getHumanoid(character)
     if not character then
@@ -1494,12 +1498,31 @@ local function getClosestTarget()
     end
 
     if RCX.AIMBOT.Target_AI then
+        local seenAI = {}
+
         for model in pairs(ActiveAIESP) do
             if model
                 and model.Parent
                 and not Players:GetPlayerFromCharacter(model)
             then
+                seenAI[model] = true
                 considerTarget(model)
+            end
+        end
+
+        for _, object in ipairs(Workspace:GetDescendants()) do
+            if object:IsA("Humanoid") then
+                local model = object.Parent
+
+                if model
+                    and model:IsA("Model")
+                    and not seenAI[model]
+                    and not Players:GetPlayerFromCharacter(model)
+                    and model:FindFirstChild("Head")
+                then
+                    seenAI[model] = true
+                    considerTarget(model)
+                end
             end
         end
     end
