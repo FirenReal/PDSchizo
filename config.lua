@@ -1,5 +1,5 @@
--- RSWA Project Delta | ESP + Zoom
--- Solo ESP (jugadores/NPC) y zoom. Sin aimbot ni recoil.
+-- RSWA Project Delta | ESP + Zoom + Aimbot con bloqueo de objetivo
+-- El aimbot NO cambia a otro objetivo al morir el seleccionado.
 -- Compatibilidad: modelos replicados con Humanoid + Head (R6/R15/custom).
 
 local Players = game:GetService("Players")
@@ -24,6 +24,10 @@ local CFG = {
     Boxes = true, HeadDot = true, HealthBar = true,
     TeamFilter = false, MaxDistance = 2200, UpdateHz = 25,
     Zoom = true, ZoomFOV = 25, ZoomKey = Enum.KeyCode.C, ZoomMode = "Hold",
+    Aimbot = false, AimPlayers = true, AimNPC = true, AimEnemyOnly = false,
+    AimKey = Enum.KeyCode.P, AimTrigger = "Key", AimMode = "Hold",
+    AimBone = "Head", AimSelect = "Cursor", AimSmooth = 0.35,
+    AimFOV = true, AimFOVRadius = 160, AimMaxDistance = 2200,
 }
 local COLOR = {
     Player = RGB(255, 205, 75), NPC = RGB(60, 204, 255),
@@ -188,6 +192,89 @@ local function updateESP(e, model, p, npc, cam, origin)
     else d.barBg.Visible, d.bar.Visible = false, false end
 end
 
+-- Aimbot: objetivo fijo durante cada pulsación/activación.
+-- Al morir, desaparecer o cambiar de modelo NO se selecciona otro
+-- hasta soltar y volver a pulsar (o desactivar/reactivar Toggle).
+local aimActive = false
+local captureAimKey = false
+local lockedTarget = nil
+local targetSpent = false
+local fovCircle = draw("Circle")
+fovCircle.Visible, fovCircle.Filled = false, false
+fovCircle.NumSides, fovCircle.Thickness = 64, 1.5
+fovCircle.Transparency, fovCircle.Color = 0.86, COLOR.Accent
+
+local function aimCursor(cam)
+    local size = cam.ViewportSize
+    if UIS.MouseBehavior == Enum.MouseBehavior.LockCenter then
+        return V2(size.X * 0.5, size.Y * 0.5)
+    end
+    local p = UIS:GetMouseLocation()
+    return V2(p.X, p.Y)
+end
+
+local function aimPoint(model)
+    local r, h = rootPart(model), head(model)
+    if not r then return nil end
+    if CFG.AimBone == "Head" and h then return h.Position end
+    if CFG.AimBone == "Neck" and h then
+        return h.Position - V3(0, h.Size.Y / 2, 0)
+    end
+    if CFG.AimBone == "Feet" then return r.Position - V3(0, 2.5, 0) end
+    return r.Position
+end
+
+local function findAimTarget(cam, origin, cursor)
+    local best, bestDist = nil, math.huge
+    local function consider(model)
+        if not model or not model.Parent then return end
+        local h, r = humanoid(model), rootPart(model)
+        if not h or h.Health <= 0 or not r then return end
+        local pos = aimPoint(model)
+        if not pos then return end
+        local distWorld = (r.Position - origin).Magnitude
+        if distWorld > CFG.AimMaxDistance then return end
+        local screen = projected(cam, pos)
+        if not screen then return end
+        local distCursor = (screen - cursor).Magnitude
+        if CFG.AimFOV and distCursor > CFG.AimFOVRadius then return end
+        local score = CFG.AimSelect == "Character" and distWorld or distCursor
+        if score < bestDist then
+            bestDist, best = score, model
+        end
+    end
+    if CFG.AimPlayers then
+        for player in pairs(playerCache) do
+            if not CFG.AimEnemyOnly or not sameTeam(player) then
+                consider(player.Character)
+            end
+        end
+    end
+    if CFG.AimNPC then
+        for model in pairs(npcCache) do
+            if not Players:GetPlayerFromCharacter(model) then consider(model) end
+        end
+    end
+    return best
+end
+
+local function stopAim()
+    aimActive, lockedTarget, targetSpent = false, nil, false
+end
+
+local function startAim()
+    -- La búsqueda se hace SOLO al iniciar una nueva activación.
+    aimActive = true
+    lockedTarget = nil
+    targetSpent = true
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    local meRoot = rootPart(me.Character)
+    local origin = meRoot and meRoot.Position or cam.CFrame.Position
+    lockedTarget = findAimTarget(cam, origin, aimCursor(cam))
+    targetSpent = lockedTarget == nil
+end
+
 -- Zoom con FOV, tecla y modo configurables.
 local zoomActive, savedFOV, savedCamera = false, nil, nil
 local function zoomOff()
@@ -208,7 +295,7 @@ end
 local captureKey = false
 listen(UIS.InputBegan, function(input, consumed)
     if not alive then return end
-    if captureKey then return end
+    if captureKey or captureAimKey then return end
     if consumed or UIS:GetFocusedTextBox() then return end
     if input.UserInputType == Enum.UserInputType.Keyboard
         and input.KeyCode == CFG.ZoomKey and CFG.Zoom then
@@ -216,11 +303,30 @@ listen(UIS.InputBegan, function(input, consumed)
             if zoomActive then zoomOff() else zoomOn() end
         else zoomOn() end
     end
+    if not CFG.Aimbot then return end
+    local pressed = (CFG.AimTrigger == "Mouse2"
+            and input.UserInputType == Enum.UserInputType.MouseButton2)
+        or (CFG.AimTrigger == "Key"
+            and input.UserInputType == Enum.UserInputType.Keyboard
+            and input.KeyCode == CFG.AimKey)
+    if not pressed then return end
+    if CFG.AimMode == "Toggle" then
+        if aimActive then stopAim() else startAim() end
+    else
+        if not aimActive then startAim() end
+    end
 end)
 listen(UIS.InputEnded, function(input)
-    if not alive or captureKey then return end
+    if not alive then return end
     if CFG.ZoomMode == "Hold" and input.UserInputType == Enum.UserInputType.Keyboard
         and input.KeyCode == CFG.ZoomKey then zoomOff() end
+    if CFG.AimMode ~= "Hold" then return end
+    local released = (CFG.AimTrigger == "Mouse2"
+            and input.UserInputType == Enum.UserInputType.MouseButton2)
+        or (CFG.AimTrigger == "Key"
+            and input.UserInputType == Enum.UserInputType.Keyboard
+            and input.KeyCode == CFG.AimKey)
+    if released then stopAim() end
 end)
 
 -- UI compacta RSWA.
@@ -364,6 +470,41 @@ local function keyRow()
     end)
 end
 
+local function aimCycleRow(label, key, values)
+    local f = row(label)
+    local b = make("TextButton", {Position = UDim2.new(1, -116, 0.5, -11), Size = UDim2.fromOffset(106, 22),
+        BackgroundColor3 = COLOR.UI, BorderSizePixel = 0, TextColor3 = COLOR.Accent,
+        Font = Enum.Font.GothamMedium, TextSize = 10, Text = CFG[key], Parent = f})
+    roundBox(b)
+    listen(b.MouseButton1Click, function()
+        stopAim()
+        local current = table.find(values, CFG[key]) or 1
+        CFG[key] = values[current % #values + 1]
+        b.Text = CFG[key]
+    end)
+end
+local function aimKeyRow()
+    local f = row("Aim Key")
+    local b = make("TextButton", {Position = UDim2.new(1, -96, 0.5, -11), Size = UDim2.fromOffset(86, 22),
+        BackgroundColor3 = COLOR.UI, BorderSizePixel = 0, TextColor3 = COLOR.Accent,
+        Font = Enum.Font.GothamMedium, TextSize = 10, Text = CFG.AimKey.Name, Parent = f})
+    roundBox(b)
+    listen(b.MouseButton1Click, function()
+        stopAim()
+        zoomOff()
+        captureAimKey = true
+        b.Text = "PULSA..."
+    end)
+    listen(UIS.InputBegan, function(input)
+        if not alive or not captureAimKey then return end
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            if input.KeyCode ~= Enum.KeyCode.Escape then CFG.AimKey = input.KeyCode end
+            b.Text = CFG.AimKey.Name
+            captureAimKey = false
+        end
+    end)
+end
+
 toggle("ESP", "ESP")
 toggle("Jugadores", "Players")
 toggle("NPC / Bots", "NPC")
@@ -380,6 +521,20 @@ toggle("Zoom", "Zoom", function(enabled) if not enabled then zoomOff() end end)
 keyRow()
 modeRow()
 numberRow("Zoom FOV", "ZoomFOV", 5, 90, 5, "°")
+-- Aimbot: nunca cambia de objetivo dentro de una misma activación.
+toggle("Aimbot", "Aimbot", function(enabled) if not enabled then stopAim() end end)
+toggle("Aim jugadores", "AimPlayers", stopAim)
+toggle("Aim NPC / Bots", "AimNPC", stopAim)
+toggle("Aim solo enemigos", "AimEnemyOnly", stopAim)
+toggle("Aim FOV", "AimFOV", stopAim)
+numberRow("Aim radio FOV", "AimFOVRadius", 20, 500, 10, " px")
+numberRow("Aim distancia", "AimMaxDistance", 200, 5000, 100, "")
+numberRow("Aim suavidad", "AimSmooth", 0.05, 0.95, 0.05, "")
+aimCycleRow("Aim punto", "AimBone", {"Head", "Neck", "Torso", "Feet"})
+aimCycleRow("Aim cercanía", "AimSelect", {"Cursor", "Character"})
+aimCycleRow("Aim botón", "AimTrigger", {"Key", "Mouse2"})
+aimCycleRow("Aim modo", "AimMode", {"Hold", "Toggle"})
+aimKeyRow()
 
 local minim = false
 listen(minBtn.MouseButton1Click, function()
@@ -413,6 +568,8 @@ local function cleanup()
     if not alive then return end
     alive = false
     zoomOff()
+    stopAim()
+    pcall(function() fovCircle:Remove() end)
     pcall(function() RunService:UnbindFromRenderStep("RSWA_PD_Zoom") end)
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(playerCache) do removeDrawings(e.d) end
@@ -446,6 +603,30 @@ end)
 local elapsed = 0
 listen(RunService.RenderStepped, function(dt)
     if not alive then return end
+    -- Dibujo FOV y apuntado; la búsqueda ocurre únicamente en startAim().
+    local aimCam = Workspace.CurrentCamera
+    if aimCam then
+        local cursor = aimCursor(aimCam)
+        fovCircle.Position, fovCircle.Radius = cursor, CFG.AimFOVRadius
+        fovCircle.Visible = CFG.Aimbot and CFG.AimFOV
+        if CFG.Aimbot and aimActive and lockedTarget and not targetSpent then
+            local hum = humanoid(lockedTarget)
+            if not lockedTarget.Parent or not hum or hum.Health <= 0 then
+                lockedTarget = nil
+                targetSpent = true
+            else
+                local world = aimPoint(lockedTarget)
+                local point = world and projected(aimCam, world)
+                if point and type(mousemoverel) == "function" then
+                    local delta = point - cursor
+                    local factor = clamp(1 - CFG.AimSmooth, 0.03, 0.95)
+                    pcall(mousemoverel, delta.X * factor, delta.Y * factor)
+                end
+            end
+        end
+    else
+        fovCircle.Visible = false
+    end
     elapsed = elapsed + dt
     if elapsed < 1 / CFG.UpdateHz then return end
     elapsed = 0
