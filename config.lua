@@ -7,6 +7,7 @@ local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
 local me = Players.LocalPlayer
 if not me then return end
 
@@ -23,6 +24,10 @@ local CFG = {
     Names = true, Health = true, Distance = true,
     Boxes = true, HeadDot = true, HealthBar = true,
     TeamFilter = false, MaxDistance = 2200, UpdateHz = 25,
+    BoxMode = "Corners", TextSize = 13, DotSize = 4,
+    PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
+    DistanceFade = true, ShowBodies = false, HighlightTarget = true,
+    AutoSave = true,
     Zoom = true, ZoomFOV = 25, ZoomKey = Enum.KeyCode.C, ZoomMode = "Hold",
     Aimbot = false, AimPlayers = true, AimNPC = true, AimEnemyOnly = false,
     AimKey = Enum.KeyCode.P, AimTrigger = "Key", AimMode = "Hold",
@@ -34,9 +39,102 @@ local COLOR = {
     Ally = RGB(96, 235, 140), Text = RGB(240, 245, 250),
     UI = RGB(13, 17, 24), Panel = RGB(21, 27, 38),
     Accent = RGB(65, 214, 191), Muted = RGB(160, 172, 187),
+    Dead = RGB(159, 162, 174), Target = RGB(255, 255, 255),
 }
 
+local PALETTE = {
+    Yellow = COLOR.Player, Blue = COLOR.NPC, Red = RGB(248, 87, 95),
+    Green = COLOR.Ally, Purple = RGB(188, 116, 252),
+    White = COLOR.Target, Gray = COLOR.Dead,
+}
+
+-- Configuración persistente (opcional: requiere readfile/writefile).
+local SETTINGS_FILE = "RSWA_ProjectDelta_config.json"
+local SETTINGS_LIMITS = {
+    MaxDistance = {200, 5000}, UpdateHz = {10, 60},
+    TextSize = {10, 20}, DotSize = {2, 10},
+    ZoomFOV = {5, 90}, AimFOVRadius = {20, 500},
+    AimMaxDistance = {200, 5000}, AimSmooth = {0.05, 0.95},
+}
+local SETTINGS_OPTIONS = {
+    BoxMode = {Full = true, Corners = true},
+    PlayerPalette = {Yellow=true,Blue=true,Red=true,Green=true,Purple=true,White=true,Gray=true},
+    NPCPalette = {Yellow=true,Blue=true,Red=true,Green=true,Purple=true,White=true,Gray=true},
+    DeadPalette = {Yellow=true,Blue=true,Red=true,Green=true,Purple=true,White=true,Gray=true},
+    ZoomMode = {Hold = true, Toggle = true},
+    AimTrigger = {Key = true, Mouse2 = true},
+    AimMode = {Hold = true, Toggle = true},
+    AimBone = {Head = true, Neck = true, Torso = true, Feet = true},
+    AimSelect = {Cursor = true, Character = true},
+}
+local function snapshotSettings()
+    local values = {}
+    for key, value in pairs(CFG) do
+        if typeof(value) == "EnumItem" then
+            values[key] = value.Name
+        else
+            values[key] = value
+        end
+    end
+    return values
+end
+local function saveSettings()
+    if type(writefile) ~= "function" then
+        return false, "No disponible: writefile"
+    end
+    local ok, err = pcall(function()
+        writefile(SETTINGS_FILE, HttpService:JSONEncode(snapshotSettings()))
+    end)
+    return ok, ok and "Configuración guardada" or tostring(err)
+end
+local function loadSettings()
+    if type(readfile) ~= "function" then
+        return false, "No disponible: readfile"
+    end
+    local readOK, content = pcall(readfile, SETTINGS_FILE)
+    if not readOK or type(content) ~= "string" then
+        return false, "No existe una configuración guardada"
+    end
+    local decodeOK, data = pcall(function() return HttpService:JSONDecode(content) end)
+    if not decodeOK or type(data) ~= "table" then
+        return false, "Archivo de configuración inválido"
+    end
+    for key, default in pairs(CFG) do
+        local value = data[key]
+        if typeof(default) == "EnumItem" and type(value) == "string" then
+            local ok, code = pcall(function() return Enum.KeyCode[value] end)
+            if ok and code and code ~= Enum.KeyCode.Unknown then CFG[key] = code end
+        elseif type(value) == type(default) then
+            local limits = SETTINGS_LIMITS[key]
+            local options = SETTINGS_OPTIONS[key]
+            if limits and type(value) == "number" and value == value
+                and value ~= math.huge and value ~= -math.huge then
+                CFG[key] = math.clamp(value, limits[1], limits[2])
+            elseif options and options[value] then
+                CFG[key] = value
+            elseif not limits and not options then
+                CFG[key] = value
+            end
+        end
+    end
+    return true, "Configuración cargada"
+end
+local configLoaded, configMessage = loadSettings()
+
 local alive, connections = true, {}
+local saveRevision = 0
+local setSaveStatus = function() end
+local function scheduleSave()
+    saveRevision = saveRevision + 1
+    local revision = saveRevision
+    if not CFG.AutoSave or type(writefile) ~= "function" then return end
+    task.delay(1, function()
+        if alive and revision == saveRevision then
+            local ok, message = saveSettings()
+            setSaveStatus(ok and "Guardado automáticamente" or message)
+        end
+    end)
+end
 local playerCache, npcCache = {}, {}
 local function listen(signal, fn)
     local c = signal:Connect(fn)
@@ -92,11 +190,48 @@ local function makeDrawings()
 end
 local function hide(d)
     if not d then return end
-    for _, obj in pairs(d) do obj.Visible = false end
+    for key, obj in pairs(d) do
+        if key == "corners" then
+            for _, line in ipairs(obj) do line.Visible = false end
+        else
+            obj.Visible = false
+        end
+    end
 end
 local function removeDrawings(d)
     if not d then return end
-    for _, obj in pairs(d) do pcall(function() obj:Remove() end) end
+    for key, obj in pairs(d) do
+        if key == "corners" then
+            for _, line in ipairs(obj) do pcall(function() line:Remove() end) end
+        else
+            pcall(function() obj:Remove() end)
+        end
+    end
+end
+local function updateCorners(d, x, y, width, height, color, transparency)
+    if not d.corners then
+        d.corners = {}
+        for i = 1, 8 do
+            local l = draw("Line")
+            l.Thickness, l.Visible = 1.6, false
+            d.corners[i] = l
+        end
+    end
+    local rx, ry = math.min(22, math.max(5, width * 0.26)),
+        math.min(22, math.max(5, height * 0.20))
+    local right, bottom = x + width, y + height
+    local coords = {
+        {x, y, x + rx, y}, {x, y, x, y + ry},
+        {right, y, right - rx, y}, {right, y, right, y + ry},
+        {x, bottom, x + rx, bottom}, {x, bottom, x, bottom - ry},
+        {right, bottom, right - rx, bottom},
+        {right, bottom, right, bottom - ry},
+    }
+    for i, line in ipairs(d.corners) do
+        local a = coords[i]
+        line.From, line.To = V2(a[1], a[2]), V2(a[3], a[4])
+        line.Color, line.Transparency, line.Visible = color, transparency, true
+    end
 end
 local function addPlayer(p)
     if p ~= me and not playerCache[p] then playerCache[p] = {d = nil} end
@@ -135,6 +270,8 @@ listen(Workspace.DescendantAdded, function(obj)
     end
 end)
 
+-- Compartido por la selección fija del aimbot y el ESP.
+local lockedTarget = nil
 local function updateESP(e, model, p, npc, cam, origin)
     local d = e.d
     if not CFG.ESP or (npc and not CFG.NPC) or (not npc and not CFG.Players)
@@ -144,8 +281,18 @@ local function updateESP(e, model, p, npc, cam, origin)
         hide(d)
         return
     end
-    local hum, h, r = humanoid(model), head(model), rootPart(model)
-    if not hum or hum.Health <= 0 or not h or not r then hide(d); return end
+    -- Las referencias se actualizan al reaparecer el personaje.
+    if e.model ~= model then
+        e.model, e.hum, e.head, e.root = model, nil, nil, nil
+    end
+    if not e.hum or not e.hum:IsDescendantOf(model) then e.hum = humanoid(model) end
+    if not e.head or not e.head:IsDescendantOf(model) then e.head = head(model) end
+    if not e.root or not e.root:IsDescendantOf(model) then e.root = rootPart(model) end
+    local hum, h, r = e.hum, e.head, e.root
+    if not hum or not h or not r or (hum.Health <= 0 and not CFG.ShowBodies) then
+        hide(d)
+        return
+    end
     local dist = (r.Position - origin).Magnitude
     if dist > CFG.MaxDistance then hide(d); return end
     local top = projected(cam, h.Position + V3(0, h.Size.Y * 0.5, 0))
@@ -159,19 +306,41 @@ local function updateESP(e, model, p, npc, cam, origin)
     local center = (top.X + bottom.X) * 0.5
     local left = center - width / 2
     local hp = clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-    local c = npc and COLOR.NPC or (p and sameTeam(p) and COLOR.Ally or COLOR.Player)
+    local c = npc and PALETTE[CFG.NPCPalette]
+        or (p and sameTeam(p) and COLOR.Ally or PALETTE[CFG.PlayerPalette])
+    if hum.Health <= 0 then
+        c = PALETTE[CFG.DeadPalette]
+    elseif CFG.HighlightTarget and model == lockedTarget then
+        c = COLOR.Target
+    end
+    local opacity = CFG.DistanceFade
+        and clamp(1 - 0.72 * (dist / math.max(CFG.MaxDistance, 1)) ^ 2, 0.28, 1)
+        or 1
     if not d then
         d = makeDrawings()
         e.d = d
     end
     if CFG.Boxes then
-        d.box.Position, d.box.Size = V2(left, upper), V2(width, height)
-        d.box.Color, d.box.Visible = c, true
-    else d.box.Visible = false end
+        if CFG.BoxMode == "Corners" then
+            d.box.Visible = false
+            updateCorners(d, left, upper, width, height, c, opacity)
+        else
+            if d.corners then
+                for _, line in ipairs(d.corners) do line.Visible = false end
+            end
+            d.box.Position, d.box.Size = V2(left, upper), V2(width, height)
+            d.box.Color, d.box.Transparency, d.box.Visible = c, opacity, true
+        end
+    else
+        d.box.Visible = false
+        if d.corners then
+            for _, line in ipairs(d.corners) do line.Visible = false end
+        end
+    end
     if CFG.Names then
         d.name.Text = npc and model.Name or (p.DisplayName or p.Name)
         d.name.Position, d.name.Color = V2(center, upper - 18), c
-        d.name.Visible = true
+        d.name.Size, d.name.Transparency, d.name.Visible = CFG.TextSize, opacity, true
     else d.name.Visible = false end
     if CFG.Health or CFG.Distance then
         local hpText = tostring(math.floor(hp * 100 + 0.5)) .. "%"
@@ -179,15 +348,20 @@ local function updateESP(e, model, p, npc, cam, origin)
         d.status.Text = CFG.Health and CFG.Distance and (hpText .. " | " .. distanceText)
             or (CFG.Health and hpText or distanceText)
         d.status.Position, d.status.Visible = V2(center, lower + 4), true
+        d.status.Size = math.max(9, CFG.TextSize - 2)
+        d.status.Transparency = opacity
     else d.status.Visible = false end
     if CFG.HeadDot then
         d.dot.Position, d.dot.Color, d.dot.Visible = head2d, c, true
+        d.dot.Radius, d.dot.Transparency = CFG.DotSize, opacity
     else d.dot.Visible = false end
     if CFG.HealthBar then
         local x = left - 6
         d.barBg.From, d.barBg.To = V2(x, upper), V2(x, lower)
         d.bar.From, d.bar.To = V2(x, lower), V2(x, lower - height * hp)
-        d.bar.Color = RGB(245, 70, 70):Lerp(RGB(65, 245, 100), hp)
+        d.bar.Color = hum.Health <= 0 and PALETTE[CFG.DeadPalette]
+            or RGB(245, 70, 70):Lerp(RGB(65, 245, 100), hp)
+        d.bar.Transparency = opacity
         d.barBg.Visible, d.bar.Visible = true, true
     else d.barBg.Visible, d.bar.Visible = false, false end
 end
@@ -197,7 +371,6 @@ end
 -- hasta soltar y volver a pulsar (o desactivar/reactivar Toggle).
 local aimActive = false
 local captureAimKey = false
-local lockedTarget = nil
 local targetSpent = false
 local fovCircle = draw("Circle")
 fovCircle.Visible, fovCircle.Filled = false, false
@@ -385,6 +558,10 @@ local scroll = make("ScrollingFrame", {
 make("UIPadding", {PaddingTop = UDim.new(0, 9), PaddingLeft = UDim.new(0, 9),
     PaddingRight = UDim.new(0, 9), PaddingBottom = UDim.new(0, 9), Parent = scroll})
 make("UIListLayout", {Padding = UDim.new(0, 5), Parent = scroll})
+local refreshUI = {}
+local function refreshAll()
+    for _, fn in ipairs(refreshUI) do pcall(fn) end
+end
 local function row(label)
     local f = make("Frame", {Size = UDim2.new(1, -3, 0, 32), BackgroundColor3 = COLOR.Panel,
         BorderSizePixel = 0, Parent = scroll})
@@ -409,7 +586,9 @@ local function toggle(label, key, action)
         CFG[key] = not CFG[key]
         if action then action(CFG[key]) end
         refresh()
+        scheduleSave()
     end)
+    refreshUI[#refreshUI + 1] = refresh
     refresh()
 end
 local function numberRow(label, key, minValue, maxValue, step, suffix)
@@ -432,6 +611,10 @@ local function numberRow(label, key, minValue, maxValue, step, suffix)
             local cam = Workspace.CurrentCamera
             if cam then cam.FieldOfView = CFG.ZoomFOV end
         end
+        if delta ~= 0 then scheduleSave() end
+    end
+    refreshUI[#refreshUI + 1] = function()
+        value.Text = tostring(CFG[key]) .. (suffix or "")
     end
     listen(bMinus.MouseButton1Click, function() change(-step) end)
     listen(bPlus.MouseButton1Click, function() change(step) end)
@@ -447,7 +630,9 @@ local function modeRow()
         zoomOff()
         CFG.ZoomMode = CFG.ZoomMode == "Hold" and "Toggle" or "Hold"
         b.Text = CFG.ZoomMode
+        scheduleSave()
     end)
+    refreshUI[#refreshUI + 1] = function() b.Text = CFG.ZoomMode end
 end
 local function keyRow()
     local f = row("Zoom Key")
@@ -463,11 +648,14 @@ local function keyRow()
     listen(UIS.InputBegan, function(input)
         if not alive or not captureKey then return end
         if input.UserInputType == Enum.UserInputType.Keyboard then
-            if input.KeyCode ~= Enum.KeyCode.Escape then CFG.ZoomKey = input.KeyCode end
+            if input.KeyCode ~= Enum.KeyCode.Escape
+                and input.KeyCode ~= Enum.KeyCode.Unknown then CFG.ZoomKey = input.KeyCode end
             b.Text = CFG.ZoomKey.Name
             captureKey = false
+            scheduleSave()
         end
     end)
+    refreshUI[#refreshUI + 1] = function() b.Text = CFG.ZoomKey.Name end
 end
 
 local function aimCycleRow(label, key, values)
@@ -477,11 +665,13 @@ local function aimCycleRow(label, key, values)
         Font = Enum.Font.GothamMedium, TextSize = 10, Text = CFG[key], Parent = f})
     roundBox(b)
     listen(b.MouseButton1Click, function()
-        stopAim()
+        if key:sub(1, 3) == "Aim" then stopAim() end
         local current = table.find(values, CFG[key]) or 1
         CFG[key] = values[current % #values + 1]
         b.Text = CFG[key]
+        scheduleSave()
     end)
+    refreshUI[#refreshUI + 1] = function() b.Text = CFG[key] end
 end
 local function aimKeyRow()
     local f = row("Aim Key")
@@ -498,11 +688,14 @@ local function aimKeyRow()
     listen(UIS.InputBegan, function(input)
         if not alive or not captureAimKey then return end
         if input.UserInputType == Enum.UserInputType.Keyboard then
-            if input.KeyCode ~= Enum.KeyCode.Escape then CFG.AimKey = input.KeyCode end
+            if input.KeyCode ~= Enum.KeyCode.Escape
+                and input.KeyCode ~= Enum.KeyCode.Unknown then CFG.AimKey = input.KeyCode end
             b.Text = CFG.AimKey.Name
             captureAimKey = false
+            scheduleSave()
         end
     end)
+    refreshUI[#refreshUI + 1] = function() b.Text = CFG.AimKey.Name end
 end
 
 toggle("ESP", "ESP")
@@ -515,6 +708,15 @@ toggle("Cajas", "Boxes")
 toggle("Punto cabeza", "HeadDot")
 toggle("Barra vida", "HealthBar")
 toggle("Ocultar aliados (si Teams)", "TeamFilter")
+toggle("Desvanecer por distancia", "DistanceFade")
+toggle("Mostrar cuerpos", "ShowBodies")
+toggle("Marcar objetivo seleccionado", "HighlightTarget")
+aimCycleRow("Tipo de caja", "BoxMode", {"Corners", "Full"})
+aimCycleRow("Color jugadores", "PlayerPalette", {"Yellow", "Blue", "Red", "Green", "Purple", "White", "Gray"})
+aimCycleRow("Color NPC", "NPCPalette", {"Blue", "Red", "Green", "Purple", "Yellow", "White", "Gray"})
+aimCycleRow("Color muertos", "DeadPalette", {"Gray", "Red", "Purple", "White", "Blue", "Yellow", "Green"})
+numberRow("Tamaño nombre", "TextSize", 10, 20, 1, "")
+numberRow("Tamaño punto", "DotSize", 2, 10, 1, "")
 numberRow("Distancia ESP", "MaxDistance", 200, 5000, 200, "")
 numberRow("ESP Hz", "UpdateHz", 10, 60, 5, "")
 toggle("Zoom", "Zoom", function(enabled) if not enabled then zoomOff() end end)
@@ -535,6 +737,48 @@ aimCycleRow("Aim cercanía", "AimSelect", {"Cursor", "Character"})
 aimCycleRow("Aim botón", "AimTrigger", {"Key", "Mouse2"})
 aimCycleRow("Aim modo", "AimMode", {"Hold", "Toggle"})
 aimKeyRow()
+
+-- Guardar / cargar sin depender de servicios externos.
+toggle("Guardar automáticamente", "AutoSave")
+local storageRow = row("Estado ajustes")
+local storageLabel = make("TextLabel", {
+    Position = UDim2.new(0.33, 0, 0, 0), Size = UDim2.new(0.67, -8, 1, 0),
+    BackgroundTransparency = 1, Text = "", TextColor3 = COLOR.Accent,
+    Font = Enum.Font.Gotham, TextSize = 9, TextXAlignment = Enum.TextXAlignment.Right,
+    TextTruncate = Enum.TextTruncate.AtEnd, Parent = storageRow,
+})
+setSaveStatus = function(message)
+    if storageLabel and storageLabel.Parent then
+        storageLabel.Text = tostring(message)
+    end
+end
+setSaveStatus(configMessage)
+local function actionRow(label, buttonText, action)
+    local f = row(label)
+    local b = make("TextButton", {
+        Position = UDim2.new(1, -94, 0.5, -11), Size = UDim2.fromOffset(84, 22),
+        BackgroundColor3 = COLOR.UI, BorderSizePixel = 0,
+        Text = buttonText, TextColor3 = COLOR.Accent,
+        Font = Enum.Font.GothamSemibold, TextSize = 10, Parent = f,
+    })
+    roundBox(b)
+    listen(b.MouseButton1Click, action)
+end
+actionRow("Guardar ahora", "GUARDAR", function()
+    saveRevision = saveRevision + 1
+    local ok, message = saveSettings()
+    setSaveStatus(message)
+end)
+actionRow("Recuperar ajustes", "CARGAR", function()
+    saveRevision = saveRevision + 1
+    local ok, message = loadSettings()
+    if ok then
+        zoomOff()
+        stopAim()
+        refreshAll()
+    end
+    setSaveStatus(message)
+end)
 
 local minim = false
 listen(minBtn.MouseButton1Click, function()
@@ -566,6 +810,7 @@ end)
 
 local function cleanup()
     if not alive then return end
+    if CFG.AutoSave then saveSettings() end
     alive = false
     zoomOff()
     stopAim()
