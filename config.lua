@@ -26,7 +26,7 @@ local CFG = {
     TeamFilter = false, MaxDistance = 2200, UpdateHz = 25,
     BoxMode = "Corners", TextSize = 13, DotSize = 4,
     PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
-    DistanceFade = true, ShowBodies = false, HighlightTarget = true,
+    DistanceFade = true, ShowBodies = true, HighlightTarget = true,
     AutoSave = true,
     Zoom = true, ZoomFOV = 25, ZoomKey = Enum.KeyCode.C, ZoomMode = "Hold",
     Aimbot = false, AimPlayers = true, AimNPC = true, AimEnemyOnly = false,
@@ -135,7 +135,8 @@ local function scheduleSave()
         end
     end)
 end
-local playerCache, npcCache = {}, {}
+local playerCache, npcCache, corpseCache = {}, {}, {}
+local watchedDeath, recentDeaths = setmetatable({}, {__mode = "k"}), {}
 local function listen(signal, fn)
     local c = signal:Connect(fn)
     connections[#connections + 1] = c
@@ -254,30 +255,119 @@ local function removeNPC(model)
     if e then removeDrawings(e.d); npcCache[model] = nil end
 end
 
+-- Registro propio de cuerpos: sigue funcionando tras el respawn o
+-- cuando el juego crea un ragdoll sin Humanoid.
+local function bodyPart(model)
+    return head(model)
+        or rootPart(model)
+        or model:FindFirstChildWhichIsA("BasePart", true)
+end
+local function corpseName(model)
+    local name = model.Name:lower()
+    return name:find("corpse", 1, true)
+        or name:find("ragdoll", 1, true)
+        or name:find("deadbody", 1, true)
+        or name:find("dead_body", 1, true)
+        or name:find("dead body", 1, true)
+        or name:find("cadaver", 1, true)
+        or name:find("cuerpo", 1, true)
+        or name == "body"
+        or model:GetAttribute("IsCorpse") == true
+        or model:GetAttribute("IsDead") == true
+        or model:GetAttribute("Dead") == true
+end
+local function addCorpse(model, label)
+    if not alive or not model or not model:IsA("Model")
+        or not model:IsDescendantOf(Workspace) or not bodyPart(model) then return end
+    local existing = corpseCache[model]
+    if existing then
+        if label then existing.label = label end
+        return
+    end
+    corpseCache[model] = {d = nil, model = model, dead = true, label = label or model.Name}
+end
+local function removeCorpse(model)
+    local e = corpseCache[model]
+    if e then removeDrawings(e.d); corpseCache[model] = nil end
+end
+local function maybeCorpse(model)
+    if not model or not model:IsA("Model") or not bodyPart(model) then return end
+    local hum = humanoid(model)
+    if hum and hum.Health > 0 then return end
+    local lastDeath = recentDeaths[model.Name:lower()]
+    local associatedWithDeath = lastDeath and (os.clock() - lastDeath < 120)
+    if corpseName(model) or associatedWithDeath or (hum and hum.Health <= 0) then
+        addCorpse(model)
+    end
+end
+local function watchDeath(model, hum)
+    if not hum or watchedDeath[hum] then return end
+    watchedDeath[hum] = true
+    listen(hum.Died, function()
+        if not alive then return end
+        recentDeaths[model.Name:lower()] = os.clock()
+        addCorpse(model)
+    end)
+    if hum.Health <= 0 then addCorpse(model) end
+end
+local function inspectCharacterModel(model)
+    if not model or not model:IsA("Model") then return end
+    local hum = humanoid(model)
+    if hum then watchDeath(model, hum) end
+    if not Players:GetPlayerFromCharacter(model) then addNPC(model) end
+    maybeCorpse(model)
+end
+
 for _, p in ipairs(Players:GetPlayers()) do addPlayer(p) end
 listen(Players.PlayerAdded, addPlayer)
 listen(Players.PlayerRemoving, removePlayer)
--- Un solo escaneo inicial; los nuevos modelos entran por eventos.
+-- Escaneo inicial una sola vez; después usamos eventos, sin barrido por frame.
 for _, obj in ipairs(Workspace:GetDescendants()) do
-    if obj:IsA("Humanoid") then addNPC(obj.Parent) end
+    if obj:IsA("Humanoid") then
+        inspectCharacterModel(obj.Parent)
+    elseif obj:IsA("Model") and corpseName(obj) then
+        maybeCorpse(obj)
+    end
 end
 listen(Workspace.DescendantAdded, function(obj)
     local model
-    if obj:IsA("Humanoid") then model = obj.Parent
-    elseif obj:IsA("BasePart") and obj.Name == "Head" then model = obj.Parent end
-    if model and model:IsA("Model") then
-        task.delay(0.12, function() if alive then addNPC(model) end end)
+    if obj:IsA("Model") then model = obj
+    elseif obj:IsA("Humanoid") then model = obj.Parent
+    elseif obj:IsA("BasePart") then
+        if obj.Name == "Head" or obj.Name == "Torso" or obj.Name == "UpperTorso"
+            or obj.Name == "HumanoidRootPart" then model = obj.Parent end
     end
+    if model and model:IsA("Model") then
+        task.delay(0.12, function()
+            if alive and model:IsDescendantOf(Workspace) then inspectCharacterModel(model) end
+        end)
+    end
+end)
+-- Registrar muerte en jugadores incluso si sus Character ya estaban creados.
+local function watchPlayerCharacter(p, model)
+    if not model then return end
+    local hum = humanoid(model)
+    if hum then watchDeath(model, hum) end
+    listen(model.ChildAdded, function(child)
+        if child:IsA("Humanoid") then watchDeath(model, child) end
+    end)
+end
+for _, p in ipairs(Players:GetPlayers()) do
+    if p.Character then watchPlayerCharacter(p, p.Character) end
+    listen(p.CharacterAdded, function(model) watchPlayerCharacter(p, model) end)
+end
+listen(Players.PlayerAdded, function(p)
+    listen(p.CharacterAdded, function(model) watchPlayerCharacter(p, model) end)
 end)
 
 -- Compartido por la selección fija del aimbot y el ESP.
 local lockedTarget = nil
 local function updateESP(e, model, p, npc, cam, origin)
     local d = e.d
-    if not CFG.ESP or (npc and not CFG.NPC) or (not npc and not CFG.Players)
+    if not CFG.ESP or (npc and not e.dead and not CFG.NPC) or (not npc and not CFG.Players)
         or not model or not model.Parent
         or (p and CFG.TeamFilter and sameTeam(p))
-        or (npc and Players:GetPlayerFromCharacter(model)) then
+        or (npc and not e.dead and Players:GetPlayerFromCharacter(model)) then
         hide(d)
         return
     end
@@ -289,26 +379,64 @@ local function updateESP(e, model, p, npc, cam, origin)
     if not e.head or not e.head:IsDescendantOf(model) then e.head = head(model) end
     if not e.root or not e.root:IsDescendantOf(model) then e.root = rootPart(model) end
     local hum, h, r = e.hum, e.head, e.root
-    if not hum or not h or not r or (hum.Health <= 0 and not CFG.ShowBodies) then
+    local isDead = e.dead or (hum and hum.Health <= 0)
+    if (isDead and not CFG.ShowBodies) or (not isDead and not hum)
+        or (not isDead and (not h or not r)) then
         hide(d)
         return
     end
+    if isDead and not r then r = bodyPart(model) end
+    if not r then hide(d); return end
     local dist = (r.Position - origin).Magnitude
     if dist > CFG.MaxDistance then hide(d); return end
-    local top = projected(cam, h.Position + V3(0, h.Size.Y * 0.5, 0))
-    local bottom = projected(cam, r.Position - V3(0, 2.8, 0))
-    local head2d = projected(cam, h.Position)
-    if not top or not bottom or not head2d then hide(d); return end
 
-    local upper, lower = math.min(top.Y, bottom.Y), math.max(top.Y, bottom.Y)
-    local height = math.max(lower - upper, 14)
-    local width = height * 0.46
-    local center = (top.X + bottom.X) * 0.5
-    local left = center - width / 2
-    local hp = clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+    local upper, lower, height, width, center, left, head2d
+    if isDead then
+        -- Se calculan los límites del ragdoll completo, incluso si yace en el suelo.
+        local ok, cf, bounds = pcall(function() return model:GetBoundingBox() end)
+        if not ok then hide(d); return end
+        local half = bounds * 0.5
+        local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
+        local count = 0
+        for _, x in ipairs({-1, 1}) do
+            for _, y in ipairs({-1, 1}) do
+                for _, z in ipairs({-1, 1}) do
+                    local wp = cf:PointToWorldSpace(V3(x * half.X, y * half.Y, z * half.Z))
+                    local pt = cam:WorldToViewportPoint(wp)
+                    if pt.Z > 0 then
+                        count = count + 1
+                        minX, maxX = math.min(minX, pt.X), math.max(maxX, pt.X)
+                        minY, maxY = math.min(minY, pt.Y), math.max(maxY, pt.Y)
+                    end
+                end
+            end
+        end
+        local viewport = cam.ViewportSize
+        if count == 0 or maxX < 0 or minX > viewport.X
+            or maxY < 0 or minY > viewport.Y then hide(d); return end
+        left = clamp(minX, 0, viewport.X)
+        local right = clamp(maxX, 0, viewport.X)
+        upper, lower = clamp(minY, 0, viewport.Y), clamp(maxY, 0, viewport.Y)
+        width, height = math.max(right - left, 9), math.max(lower - upper, 14)
+        center = left + width * 0.5
+        local headPoint = h and projected(cam, h.Position)
+        head2d = headPoint or projected(cam, cf.Position) or V2(center, upper + height * 0.5)
+    else
+        local top = projected(cam, h.Position + V3(0, h.Size.Y * 0.5, 0))
+        local bottom = projected(cam, r.Position - V3(0, 2.8, 0))
+        head2d = projected(cam, h.Position)
+        if not top or not bottom or not head2d then hide(d); return end
+        upper, lower = math.min(top.Y, bottom.Y), math.max(top.Y, bottom.Y)
+        height = math.max(lower - upper, 14)
+        width = height * 0.46
+        center = (top.X + bottom.X) * 0.5
+        left = center - width / 2
+    end
+
+    local hp = isDead and 0 or clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
     local c = npc and PALETTE[CFG.NPCPalette]
         or (p and sameTeam(p) and COLOR.Ally or PALETTE[CFG.PlayerPalette])
-    if hum.Health <= 0 then
+    if isDead then
         c = PALETTE[CFG.DeadPalette]
     elseif CFG.HighlightTarget and model == lockedTarget then
         c = COLOR.Target
@@ -338,12 +466,13 @@ local function updateESP(e, model, p, npc, cam, origin)
         end
     end
     if CFG.Names then
-        d.name.Text = npc and model.Name or (p.DisplayName or p.Name)
+        d.name.Text = isDead and ("[CUERPO] " .. (e.label or model.Name))
+            or (npc and model.Name or (p.DisplayName or p.Name))
         d.name.Position, d.name.Color = V2(center, upper - 18), c
         d.name.Size, d.name.Transparency, d.name.Visible = CFG.TextSize, opacity, true
     else d.name.Visible = false end
     if CFG.Health or CFG.Distance then
-        local hpText = tostring(math.floor(hp * 100 + 0.5)) .. "%"
+        local hpText = isDead and "MUERTO" or (tostring(math.floor(hp * 100 + 0.5)) .. "%")
         local distanceText = tostring(math.floor(dist + 0.5)) .. " studs"
         d.status.Text = CFG.Health and CFG.Distance and (hpText .. " | " .. distanceText)
             or (CFG.Health and hpText or distanceText)
@@ -359,7 +488,7 @@ local function updateESP(e, model, p, npc, cam, origin)
         local x = left - 6
         d.barBg.From, d.barBg.To = V2(x, upper), V2(x, lower)
         d.bar.From, d.bar.To = V2(x, lower), V2(x, lower - height * hp)
-        d.bar.Color = hum.Health <= 0 and PALETTE[CFG.DeadPalette]
+        d.bar.Color = isDead and PALETTE[CFG.DeadPalette]
             or RGB(245, 70, 70):Lerp(RGB(65, 245, 100), hp)
         d.bar.Transparency = opacity
         d.barBg.Visible, d.bar.Visible = true, true
@@ -819,8 +948,10 @@ local function cleanup()
     for _, c in ipairs(connections) do pcall(function() c:Disconnect() end) end
     for _, e in pairs(playerCache) do removeDrawings(e.d) end
     for _, e in pairs(npcCache) do removeDrawings(e.d) end
+    for _, e in pairs(corpseCache) do removeDrawings(e.d) end
     table.clear(playerCache)
     table.clear(npcCache)
+    table.clear(corpseCache)
     if gui.Parent then gui:Destroy() end
 end
 listen(closeBtn.MouseButton1Click, cleanup)
@@ -879,18 +1010,23 @@ listen(RunService.RenderStepped, function(dt)
     if not cam then
         for _, e in pairs(playerCache) do hide(e.d) end
         for _, e in pairs(npcCache) do hide(e.d) end
+        for _, e in pairs(corpseCache) do hide(e.d) end
         return
     end
     local myRoot = rootPart(me.Character)
     local origin = myRoot and myRoot.Position or cam.CFrame.Position
     for p, e in pairs(playerCache) do
-        updateESP(e, p.Character, p, false, cam, origin)
+        if corpseCache[p.Character] then hide(e.d)
+        else updateESP(e, p.Character, p, false, cam, origin) end
     end
     for model, e in pairs(npcCache) do
         if not model.Parent or Players:GetPlayerFromCharacter(model) then
             removeNPC(model)
-        else
-            updateESP(e, model, nil, true, cam, origin)
-        end
+        elseif corpseCache[model] then hide(e.d)
+        else updateESP(e, model, nil, true, cam, origin) end
+    end
+    for model, e in pairs(corpseCache) do
+        if not model:IsDescendantOf(Workspace) then removeCorpse(model)
+        else updateESP(e, model, nil, true, cam, origin) end
     end
 end)
