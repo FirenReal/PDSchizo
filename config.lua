@@ -28,7 +28,7 @@ local CFG = {
     PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
     DistanceFade = true, ShowBodies = true, HighlightTarget = true,
     AutoSave = true,
-    ItemESP = true, ItemQuery = "", ItemMaxDistance = 2000, ItemMaxMarkers = 40,
+    ItemESP = true, ItemContainers = true, ItemQuery = "", ItemMaxDistance = 2000, ItemMaxMarkers = 40,
     Zoom = true, ZoomFOV = 25, ZoomKey = Enum.KeyCode.C, ZoomMode = "Hold",
     Aimbot = false, AimPlayers = true, AimNPC = true, AimEnemyOnly = false,
     AimKey = Enum.KeyCode.P, AimTrigger = "Key", AimMode = "Hold",
@@ -41,7 +41,7 @@ local COLOR = {
     UI = RGB(13, 17, 24), Panel = RGB(21, 27, 38),
     Accent = RGB(65, 214, 191), Muted = RGB(160, 172, 187),
     Dead = RGB(159, 162, 174), Target = RGB(255, 255, 255),
-    Item = RGB(255, 182, 65),
+    Item = RGB(255, 182, 65), ContainerItem = RGB(190, 124, 255),
 }
 
 local PALETTE = {
@@ -363,12 +363,16 @@ listen(Players.PlayerAdded, function(p)
     listen(p.CharacterAdded, function(model) watchPlayerCharacter(p, model) end)
 end)
 
--- Buscador de objetos: busca por nombre parcial, sin recorrer el mundo en cada frame.
--- Solo se pueden marcar instancias que el servidor replique a Workspace.
-local itemCache = {}
+-- Buscador de objetos: búsqueda parcial, también dentro de contenedores replicados.
+-- Naranja + punto = suelo. Morado + rombo = contenido en caja/contenedor.
+ -- No permite leer inventarios que el servidor no replique al cliente.
+local itemCache, containerMarkerCache = {}, {}
 local itemScanVersion = 0
-local itemMatchCount = 0
+local itemLooseCount, itemContainedCount = 0, 0
 local itemStatus = function() end
+local function itemCounts()
+    itemStatus(string.format("%d suelo / %d cont.", itemLooseCount, itemContainedCount))
+end
 local function itemTerm()
     return tostring(CFG.ItemQuery or ""):lower():match("^%s*(.-)%s*$") or ""
 end
@@ -377,25 +381,50 @@ local function itemLabel(obj)
         local v = obj:GetAttribute(key)
         if type(v) == "string" and v ~= "" then return v end
     end
+    if obj:IsA("StringValue") and type(obj.Value) == "string" then
+        local n = obj.Name:lower()
+        if n == "name" or n == "value" or n == "itemname"
+            or n == "lootname" or n == "displayname" or n == "id"
+            or n:match("^slot[%d_%-]*$")
+            or n:match("^item[%d_%-]*$") or n:match("^%d+$") then
+            if obj.Value ~= "" then return obj.Value end
+        end
+    end
     return obj.Name
 end
 local function itemMatches(obj, term)
     if term == "" then return false end
-    if tostring(obj.Name):lower():find(term, 1, true) then return true end
-    return itemLabel(obj):lower():find(term, 1, true) ~= nil
+    if obj.Name:lower():find(term, 1, true) then return true end
+    if itemLabel(obj):lower():find(term, 1, true) then return true end
+    if obj:IsA("StringValue") and type(obj.Value) == "string" then
+        return obj.Value:lower():find(term, 1, true) ~= nil
+    end
+    if obj:IsA("ObjectValue") and obj.Value then
+        return obj.Value.Name:lower():find(term, 1, true) ~= nil
+    end
+    return false
 end
 local function validItemType(obj)
     return obj:IsA("Model") or obj:IsA("Tool") or obj:IsA("BasePart")
+        or obj:IsA("ValueBase") or obj:IsA("Folder")
 end
 local function itemInCharacter(obj)
     local node = obj
     while node and node ~= Workspace do
-        if node:IsA("Model") and node:FindFirstChildOfClass("Humanoid") then return true end
+        if node:IsA("Model") then
+            local hum = node:FindFirstChildOfClass("Humanoid")
+            -- Permitir buscar dentro de restos que tengan Humanoid muerto,
+            -- pero no dentro de inventarios de personajes activos.
+            if hum and (hum.Health > 0 or Players:GetPlayerFromCharacter(node)) then
+                return true
+            end
+        end
         node = node.Parent
     end
     return false
 end
 local function itemRepresentativePart(obj)
+    if not obj then return nil end
     if obj:IsA("BasePart") then return obj end
     if obj:IsA("Tool") then
         local handle = obj:FindFirstChild("Handle")
@@ -404,14 +433,75 @@ local function itemRepresentativePart(obj)
     if obj:IsA("Model") and obj.PrimaryPart then return obj.PrimaryPart end
     return obj:FindFirstChildWhichIsA("BasePart", true)
 end
+local INVENTORY_NAMES = {
+    "inventory", "contents", "content", "items", "loot", "storeditems",
+    "containeditems", "itemlist", "storage", "slots", "backpackitems",
+}
+local CONTAINER_NAMES = {
+    "container", "crate", "chest", "locker", "stash", "cabinet", "drawer",
+    "trunk", "storage", "supply", "cache", "backpack", "bag", "barrel",
+    "fridge", "cooler", "cupboard", "safe", "lootbox", "toolbox", "shelf",
+    "closet", "corpse", "ragdoll", "deadbody", "suitcase", "case",
+}
+local function inventoryFolder(node)
+    if not node:IsA("Folder") then return false end
+    local n = node.Name:lower():gsub("[%s_%-%d]", "")
+    for _, key in ipairs(INVENTORY_NAMES) do
+        if n == key then return true end
+    end
+    return false
+end
+local function isContainerModel(node)
+    if not (node:IsA("Model") or node:IsA("BasePart")) then return false end
+    if node:GetAttribute("IsContainer") == true or node:GetAttribute("Lootable") == true
+        or node:GetAttribute("IsLootContainer") == true then return true end
+    local n = node.Name:lower():gsub("[%s_%-]", "")
+    if n == "box" or n == "body" or n == "loot" then return true end
+    for _, key in ipairs(CONTAINER_NAMES) do
+        if n:find(key, 1, true) then return true end
+    end
+    return false
+end
+local function containerForItem(obj)
+    local node, inInventory, depth = obj.Parent, false, 0
+    while node and node ~= Workspace and depth < 12 do
+        depth = depth + 1
+        if inventoryFolder(node) then inInventory = true end
+        if node:IsA("Model") or node:IsA("BasePart") then
+            if isContainerModel(node) then
+                return itemRepresentativePart(node) and node or nil
+            end
+            -- Ejemplo: Caja > Inventory > rifle (StringValue o Model).
+            if inInventory and itemRepresentativePart(node) then return node end
+        end
+        node = node.Parent
+    end
+    return nil
+end
 local function itemAlreadyRepresented(obj, term)
     local ancestor = obj.Parent
     while ancestor and ancestor ~= Workspace do
-        if validItemType(ancestor) and itemMatches(ancestor, term)
-            and not itemInCharacter(ancestor) then return true end
+        -- La caja no representa a sus objetos; se muestran como contenido.
+        if isContainerModel(ancestor) then break end
+        if validItemType(ancestor) and not inventoryFolder(ancestor)
+            and itemMatches(ancestor, term) and not itemInCharacter(ancestor) then
+            return true
+        end
         ancestor = ancestor.Parent
     end
     return false
+end
+local function removeContainerMarker(container)
+    local marker = containerMarkerCache[container]
+    if not marker then return end
+    if marker.label then pcall(function() marker.label:Remove() end) end
+    for _, line in ipairs(marker.diamond or {}) do
+        pcall(function() line:Remove() end)
+    end
+    containerMarkerCache[container] = nil
+end
+local function clearContainerMarkers()
+    for c in pairs(containerMarkerCache) do removeContainerMarker(c) end
 end
 local function removeItemEntry(obj)
     local e = itemCache[obj]
@@ -419,13 +509,15 @@ local function removeItemEntry(obj)
     if e.label then pcall(function() e.label:Remove() end) end
     if e.dot then pcall(function() e.dot:Remove() end) end
     itemCache[obj] = nil
-    itemMatchCount = math.max(0, itemMatchCount - 1)
-    itemStatus(tostring(itemMatchCount))
+    if e.container then itemContainedCount = math.max(0, itemContainedCount - 1)
+    else itemLooseCount = math.max(0, itemLooseCount - 1) end
+    itemCounts()
 end
 local function clearItems()
     for obj in pairs(itemCache) do removeItemEntry(obj) end
-    itemMatchCount = 0
-    itemStatus("0")
+    clearContainerMarkers()
+    itemLooseCount, itemContainedCount = 0, 0
+    itemCounts()
 end
 local function addItemEntry(obj)
     if not alive or not CFG.ItemESP or not obj or not validItemType(obj)
@@ -433,13 +525,18 @@ local function addItemEntry(obj)
     local term = itemTerm()
     if not itemMatches(obj, term) or itemInCharacter(obj)
         or itemAlreadyRepresented(obj, term) then return end
+    -- No etiquetar la propia caja como un ítem del interior.
+    if isContainerModel(obj) or inventoryFolder(obj) then return end
+    local container = containerForItem(obj)
+    -- Valores y carpetas necesitan un contenedor real para tener posición en el mundo.
+    if (obj:IsA("ValueBase") or obj:IsA("Folder")) and not container then return end
+    local part = container and itemRepresentativePart(container) or itemRepresentativePart(obj)
+    if not part then return end
     if not itemCache[obj] then
-        local part = itemRepresentativePart(obj)
-        if part then
-            itemCache[obj] = {part = part}
-            itemMatchCount = itemMatchCount + 1
-            itemStatus(tostring(itemMatchCount))
-        end
+        itemCache[obj] = {part = part, container = container, parent = obj.Parent}
+        if container then itemContainedCount = itemContainedCount + 1
+        else itemLooseCount = itemLooseCount + 1 end
+        itemCounts()
     end
 end
 local function scanItems()
@@ -452,12 +549,9 @@ local function scanItems()
         for i, obj in ipairs(objects) do
             if not alive or version ~= itemScanVersion then return end
             if validItemType(obj) then addItemEntry(obj) end
-            -- Ceder periódicamente para no congelar la interfaz en mapas grandes.
             if i % 450 == 0 then task.wait() end
         end
-        if version == itemScanVersion and alive then
-            itemStatus(tostring(itemMatchCount))
-        end
+        if version == itemScanVersion and alive then itemCounts() end
     end)
 end
 local function queueItemScan()
@@ -478,26 +572,97 @@ listen(Workspace.DescendantAdded, function(obj)
 end)
 listen(Workspace.DescendantRemoving, function(obj)
     if itemCache[obj] then removeItemEntry(obj) end
+    if containerMarkerCache[obj] then removeContainerMarker(obj) end
 end)
+local function makeItemLabel()
+    local label = draw("Text")
+    label.Center, label.Outline, label.Font = true, true, 3
+    label.OutlineColor, label.Size = RGB(0, 0, 0), 13
+    label.Visible = false
+    return label
+end
+local function makeContainerMarker(container)
+    local marker = containerMarkerCache[container]
+    if marker then return marker end
+    marker = {label = makeItemLabel(), diamond = {}}
+    for i = 1, 4 do
+        local line = draw("Line")
+        line.Thickness, line.Color = 2, COLOR.ContainerItem
+        line.Visible = false
+        marker.diamond[i] = line
+    end
+    containerMarkerCache[container] = marker
+    return marker
+end
+local function showDiamond(lines, position)
+    local radius = 8
+    local points = {
+        position + V2(0, -radius), position + V2(radius, 0),
+        position + V2(0, radius), position + V2(-radius, 0),
+    }
+    for i, line in ipairs(lines) do
+        line.From, line.To = points[i], points[i % 4 + 1]
+        line.Color, line.Transparency, line.Visible = COLOR.ContainerItem, 1, true
+    end
+end
+local function truncateText(value, length)
+    value = tostring(value)
+    return #value > length and (value:sub(1, length - 3) .. "...") or value
+end
 local function updateItemESP(cam, origin)
     if not CFG.ItemESP or itemTerm() == "" then return end
-    local visible = {}
+    local visible, groups = {}, {}
     for obj, e in pairs(itemCache) do
         if not obj:IsDescendantOf(Workspace) or itemInCharacter(obj) then
             removeItemEntry(obj)
         else
-            local part = e.part
-            if not part or not part:IsDescendantOf(Workspace)
-                or not (part == obj or part:IsDescendantOf(obj)) then
-                part = itemRepresentativePart(obj)
-                e.part = part
+            -- Si se traslada el ítem fuera de su caja, actualizar su clasificación.
+            if e.parent ~= obj.Parent or (e.container and not obj:IsDescendantOf(e.container)) then
+                if e.container then itemContainedCount = math.max(0, itemContainedCount - 1)
+                else itemLooseCount = math.max(0, itemLooseCount - 1) end
+                e.container, e.parent = containerForItem(obj), obj.Parent
+                if e.container then itemContainedCount = itemContainedCount + 1
+                else itemLooseCount = itemLooseCount + 1 end
+                itemCounts()
             end
+            local container = e.container
+            if container and CFG.ItemContainers then
+                local group = groups[container]
+                if not group then
+                    group = {container = container, names = {}, count = 0}
+                    groups[container] = group
+                end
+                group.count = group.count + 1
+                if #group.names < 2 then group.names[#group.names + 1] = itemLabel(obj) end
+            elseif not container then
+                local part = e.part
+                if not part or not part:IsDescendantOf(Workspace)
+                    or not (part == obj or part:IsDescendantOf(obj)) then
+                    part = itemRepresentativePart(obj)
+                    e.part = part
+                end
+                if part then
+                    local dist = (part.Position - origin).Magnitude
+                    if dist <= CFG.ItemMaxDistance then
+                        local point = projected(cam, part.Position)
+                        if point then
+                            visible[#visible + 1] = {entry = e, point = point, dist = dist, name = itemLabel(obj)}
+                        end
+                    end
+                end
+            end
+        end
+    end
+    for container, group in pairs(groups) do
+        if container:IsDescendantOf(Workspace) then
+            local part = itemRepresentativePart(container)
             if part then
                 local dist = (part.Position - origin).Magnitude
                 if dist <= CFG.ItemMaxDistance then
                     local point = projected(cam, part.Position)
                     if point then
-                        visible[#visible + 1] = {entry = e, point = point, dist = dist, name = itemLabel(obj)}
+                        group.point, group.dist = point, dist
+                        visible[#visible + 1] = {container = group, point = point, dist = dist}
                     end
                 end
             end
@@ -508,24 +673,43 @@ local function updateItemESP(cam, origin)
         if e.label then e.label.Visible = false end
         if e.dot then e.dot.Visible = false end
     end
+    for _, marker in pairs(containerMarkerCache) do
+        marker.label.Visible = false
+        for _, line in ipairs(marker.diamond) do line.Visible = false end
+    end
+    local activeContainers = {}
     for i = 1, math.min(#visible, CFG.ItemMaxMarkers) do
         local v = visible[i]
-        local e = v.entry
-        if not e.label then
-            e.label = draw("Text")
-            e.label.Center, e.label.Outline, e.label.Font = true, true, 3
-            e.label.OutlineColor, e.label.Size = RGB(0, 0, 0), 13
-            e.label.Visible = false
+        if v.container then
+            local group = v.container
+            activeContainers[group.container] = true
+            local marker = makeContainerMarker(group.container)
+            local names = truncateText(table.concat(group.names, ", "), 28)
+            if group.count > #group.names then names = names .. " +" .. tostring(group.count - #group.names) end
+            marker.label.Text = "[CONTENEDOR: " .. truncateText(group.container.Name, 18)
+                .. "] " .. names .. " [" .. math.floor(v.dist + 0.5) .. " studs]"
+            marker.label.Position = v.point + V2(0, -25)
+            marker.label.Color, marker.label.Transparency, marker.label.Visible = COLOR.ContainerItem, 1, true
+            showDiamond(marker.diamond, v.point)
+        else
+            local e = v.entry
+            if not e.label then e.label = makeItemLabel() end
+            if not e.dot then
+                e.dot = draw("Circle")
+                e.dot.Filled, e.dot.Radius, e.dot.NumSides = true, 3, 16
+                e.dot.Visible = false
+            end
+            e.label.Text = truncateText(v.name, 32) .. " [" .. math.floor(v.dist + 0.5) .. " studs]"
+            e.label.Position = v.point + V2(0, -21)
+            e.label.Color, e.label.Transparency, e.label.Visible = COLOR.Item, 1, true
+            e.dot.Position, e.dot.Color, e.dot.Transparency, e.dot.Visible = v.point, COLOR.Item, 1, true
         end
-        if not e.dot then
-            e.dot = draw("Circle")
-            e.dot.Filled, e.dot.Radius, e.dot.NumSides = true, 3, 16
-            e.dot.Visible = false
+    end
+    -- Liberar las marcas de cajas sin resultados o que ya no existen.
+    for container in pairs(containerMarkerCache) do
+        if not groups[container] or not container:IsDescendantOf(Workspace) then
+            removeContainerMarker(container)
         end
-        e.label.Text = v.name .. " [" .. math.floor(v.dist + 0.5) .. " studs]"
-        e.label.Position = v.point + V2(0, -21)
-        e.label.Color, e.label.Transparency, e.label.Visible = COLOR.Item, 1, true
-        e.dot.Position, e.dot.Color, e.dot.Transparency, e.dot.Visible = v.point, COLOR.Item, 1, true
     end
 end
 
@@ -1019,6 +1203,7 @@ numberRow("Distancia ESP", "MaxDistance", 200, 5000, 200, "")
 numberRow("ESP Hz", "UpdateHz", 10, 60, 5, "")
 -- Búsqueda de objetos: admite coincidencias parciales sin distinguir mayúsculas.
 toggle("ESP objetos", "ItemESP", function() queueItemScan() end)
+toggle("Ítems en contenedores", "ItemContainers")
 local searchRow = make("Frame", {
     Size = UDim2.new(1, -3, 0, 66), BackgroundColor3 = COLOR.Panel,
     BorderSizePixel = 0, Parent = scroll,
@@ -1060,11 +1245,11 @@ refreshUI[#refreshUI + 1] = function()
 end
 numberRow("Distancia objetos", "ItemMaxDistance", 200, 5000, 200, "")
 numberRow("Máximo de marcas", "ItemMaxMarkers", 5, 80, 5, "")
-local foundRow = row("Coincidencias")
+local foundRow = row("Resultados de búsqueda")
 local foundLabel = make("TextLabel", {
-    Position = UDim2.new(1, -90, 0, 0), Size = UDim2.fromOffset(78, 32),
-    BackgroundTransparency = 1, Text = "0", TextColor3 = COLOR.Accent,
-    Font = Enum.Font.GothamMedium, TextSize = 11,
+    Position = UDim2.new(1, -171, 0, 0), Size = UDim2.fromOffset(159, 32),
+    BackgroundTransparency = 1, Text = "0 suelo / 0 cont.", TextColor3 = COLOR.Accent,
+    Font = Enum.Font.GothamMedium, TextSize = 9,
     TextXAlignment = Enum.TextXAlignment.Right, Parent = foundRow,
 })
 itemStatus = function(count)
@@ -1239,6 +1424,10 @@ listen(RunService.RenderStepped, function(dt)
         for _, e in pairs(itemCache) do
             if e.label then e.label.Visible = false end
             if e.dot then e.dot.Visible = false end
+        end
+        for _, marker in pairs(containerMarkerCache) do
+            marker.label.Visible = false
+            for _, line in ipairs(marker.diamond) do line.Visible = false end
         end
         return
     end
