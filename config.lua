@@ -28,6 +28,7 @@ local CFG = {
     PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
     DistanceFade = true, ShowBodies = true, HighlightTarget = true,
     AutoSave = true,
+    ItemESP = true, ItemQuery = "", ItemMaxDistance = 2000, ItemMaxMarkers = 40,
     Zoom = true, ZoomFOV = 25, ZoomKey = Enum.KeyCode.C, ZoomMode = "Hold",
     Aimbot = false, AimPlayers = true, AimNPC = true, AimEnemyOnly = false,
     AimKey = Enum.KeyCode.P, AimTrigger = "Key", AimMode = "Hold",
@@ -40,6 +41,7 @@ local COLOR = {
     UI = RGB(13, 17, 24), Panel = RGB(21, 27, 38),
     Accent = RGB(65, 214, 191), Muted = RGB(160, 172, 187),
     Dead = RGB(159, 162, 174), Target = RGB(255, 255, 255),
+    Item = RGB(255, 182, 65),
 }
 
 local PALETTE = {
@@ -55,6 +57,7 @@ local SETTINGS_LIMITS = {
     TextSize = {10, 20}, DotSize = {2, 10},
     ZoomFOV = {5, 90}, AimFOVRadius = {20, 500},
     AimMaxDistance = {200, 5000}, AimSmooth = {0.05, 0.95},
+    ItemMaxDistance = {200, 5000}, ItemMaxMarkers = {5, 80},
 }
 local SETTINGS_OPTIONS = {
     BoxMode = {Full = true, Corners = true},
@@ -359,6 +362,172 @@ end
 listen(Players.PlayerAdded, function(p)
     listen(p.CharacterAdded, function(model) watchPlayerCharacter(p, model) end)
 end)
+
+-- Buscador de objetos: busca por nombre parcial, sin recorrer el mundo en cada frame.
+-- Solo se pueden marcar instancias que el servidor replique a Workspace.
+local itemCache = {}
+local itemScanVersion = 0
+local itemMatchCount = 0
+local itemStatus = function() end
+local function itemTerm()
+    return tostring(CFG.ItemQuery or ""):lower():match("^%s*(.-)%s*$") or ""
+end
+local function itemLabel(obj)
+    for _, key in ipairs({"ItemName", "DisplayName", "LootName"}) do
+        local v = obj:GetAttribute(key)
+        if type(v) == "string" and v ~= "" then return v end
+    end
+    return obj.Name
+end
+local function itemMatches(obj, term)
+    if term == "" then return false end
+    if tostring(obj.Name):lower():find(term, 1, true) then return true end
+    return itemLabel(obj):lower():find(term, 1, true) ~= nil
+end
+local function validItemType(obj)
+    return obj:IsA("Model") or obj:IsA("Tool") or obj:IsA("BasePart")
+end
+local function itemInCharacter(obj)
+    local node = obj
+    while node and node ~= Workspace do
+        if node:IsA("Model") and node:FindFirstChildOfClass("Humanoid") then return true end
+        node = node.Parent
+    end
+    return false
+end
+local function itemRepresentativePart(obj)
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Tool") then
+        local handle = obj:FindFirstChild("Handle")
+        if handle and handle:IsA("BasePart") then return handle end
+    end
+    if obj:IsA("Model") and obj.PrimaryPart then return obj.PrimaryPart end
+    return obj:FindFirstChildWhichIsA("BasePart", true)
+end
+local function itemAlreadyRepresented(obj, term)
+    local ancestor = obj.Parent
+    while ancestor and ancestor ~= Workspace do
+        if validItemType(ancestor) and itemMatches(ancestor, term)
+            and not itemInCharacter(ancestor) then return true end
+        ancestor = ancestor.Parent
+    end
+    return false
+end
+local function removeItemEntry(obj)
+    local e = itemCache[obj]
+    if not e then return end
+    if e.label then pcall(function() e.label:Remove() end) end
+    if e.dot then pcall(function() e.dot:Remove() end) end
+    itemCache[obj] = nil
+    itemMatchCount = math.max(0, itemMatchCount - 1)
+    itemStatus(tostring(itemMatchCount))
+end
+local function clearItems()
+    for obj in pairs(itemCache) do removeItemEntry(obj) end
+    itemMatchCount = 0
+    itemStatus("0")
+end
+local function addItemEntry(obj)
+    if not alive or not CFG.ItemESP or not obj or not validItemType(obj)
+        or not obj:IsDescendantOf(Workspace) then return end
+    local term = itemTerm()
+    if not itemMatches(obj, term) or itemInCharacter(obj)
+        or itemAlreadyRepresented(obj, term) then return end
+    if not itemCache[obj] then
+        local part = itemRepresentativePart(obj)
+        if part then
+            itemCache[obj] = {part = part}
+            itemMatchCount = itemMatchCount + 1
+            itemStatus(tostring(itemMatchCount))
+        end
+    end
+end
+local function scanItems()
+    itemScanVersion = itemScanVersion + 1
+    local version = itemScanVersion
+    clearItems()
+    if not CFG.ItemESP or itemTerm() == "" then return end
+    task.spawn(function()
+        local objects = Workspace:GetDescendants()
+        for i, obj in ipairs(objects) do
+            if not alive or version ~= itemScanVersion then return end
+            if validItemType(obj) then addItemEntry(obj) end
+            -- Ceder periódicamente para no congelar la interfaz en mapas grandes.
+            if i % 450 == 0 then task.wait() end
+        end
+        if version == itemScanVersion and alive then
+            itemStatus(tostring(itemMatchCount))
+        end
+    end)
+end
+local function queueItemScan()
+    itemScanVersion = itemScanVersion + 1
+    local version = itemScanVersion
+    clearItems()
+    if not CFG.ItemESP or itemTerm() == "" then return end
+    task.delay(0.45, function()
+        if alive and version == itemScanVersion then scanItems() end
+    end)
+end
+listen(Workspace.DescendantAdded, function(obj)
+    if not alive or not CFG.ItemESP or itemTerm() == "" or not validItemType(obj)
+        or not itemMatches(obj, itemTerm()) then return end
+    task.delay(0.2, function()
+        if alive and CFG.ItemESP then addItemEntry(obj) end
+    end)
+end)
+listen(Workspace.DescendantRemoving, function(obj)
+    if itemCache[obj] then removeItemEntry(obj) end
+end)
+local function updateItemESP(cam, origin)
+    if not CFG.ItemESP or itemTerm() == "" then return end
+    local visible = {}
+    for obj, e in pairs(itemCache) do
+        if not obj:IsDescendantOf(Workspace) or itemInCharacter(obj) then
+            removeItemEntry(obj)
+        else
+            local part = e.part
+            if not part or not part:IsDescendantOf(Workspace)
+                or not (part == obj or part:IsDescendantOf(obj)) then
+                part = itemRepresentativePart(obj)
+                e.part = part
+            end
+            if part then
+                local dist = (part.Position - origin).Magnitude
+                if dist <= CFG.ItemMaxDistance then
+                    local point = projected(cam, part.Position)
+                    if point then
+                        visible[#visible + 1] = {entry = e, point = point, dist = dist, name = itemLabel(obj)}
+                    end
+                end
+            end
+        end
+    end
+    table.sort(visible, function(a, b) return a.dist < b.dist end)
+    for _, e in pairs(itemCache) do
+        if e.label then e.label.Visible = false end
+        if e.dot then e.dot.Visible = false end
+    end
+    for i = 1, math.min(#visible, CFG.ItemMaxMarkers) do
+        local v = visible[i]
+        local e = v.entry
+        if not e.label then
+            e.label = draw("Text")
+            e.label.Center, e.label.Outline, e.label.Font = true, true, 3
+            e.label.OutlineColor, e.label.Size = RGB(0, 0, 0), 13
+            e.label.Visible = false
+        end
+        if not e.dot then
+            e.dot = draw("Circle")
+            e.dot.Filled, e.dot.Radius, e.dot.NumSides = true, 3, 16
+            e.dot.Visible = false
+        end
+        e.label.Text = v.name .. " [" .. math.floor(v.dist + 0.5) .. " studs]"
+        e.label.Position = v.point + V2(0, -21)
+        e.label.Color, e.label.Transparency, e.label.Visible = COLOR.Item, 1, true
+        e.dot.Position, e.dot.Color, e.dot.Transparency, e.dot.Visible = v.point, COLOR.Item, 1, true
+    end
+end
 
 -- Compartido por la selección fija del aimbot y el ESP.
 local lockedTarget = nil
@@ -848,6 +1017,59 @@ numberRow("Tamaño nombre", "TextSize", 10, 20, 1, "")
 numberRow("Tamaño punto", "DotSize", 2, 10, 1, "")
 numberRow("Distancia ESP", "MaxDistance", 200, 5000, 200, "")
 numberRow("ESP Hz", "UpdateHz", 10, 60, 5, "")
+-- Búsqueda de objetos: admite coincidencias parciales sin distinguir mayúsculas.
+toggle("ESP objetos", "ItemESP", function() queueItemScan() end)
+local searchRow = make("Frame", {
+    Size = UDim2.new(1, -3, 0, 66), BackgroundColor3 = COLOR.Panel,
+    BorderSizePixel = 0, Parent = scroll,
+})
+roundBox(searchRow)
+make("TextLabel", {
+    Position = UDim2.fromOffset(9, 4), Size = UDim2.new(1, -18, 0, 19),
+    BackgroundTransparency = 1, Text = "Buscar ítem por nombre", Font = Enum.Font.Gotham,
+    TextSize = 10, TextColor3 = COLOR.Text,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = searchRow,
+})
+local itemInput = make("TextBox", {
+    Position = UDim2.fromOffset(9, 29), Size = UDim2.new(1, -58, 0, 27),
+    BackgroundColor3 = COLOR.UI, BorderSizePixel = 0,
+    Text = CFG.ItemQuery, ClearTextOnFocus = false,
+    PlaceholderText = "Ej: rifle, medkit, ammo...",
+    PlaceholderColor3 = COLOR.Muted, TextColor3 = COLOR.Text,
+    Font = Enum.Font.Gotham, TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = searchRow,
+})
+roundBox(itemInput)
+local itemClear = make("TextButton", {
+    Position = UDim2.new(1, -40, 0, 29), Size = UDim2.fromOffset(30, 27),
+    BackgroundColor3 = COLOR.UI, BorderSizePixel = 0,
+    Text = "X", Font = Enum.Font.GothamBold, TextSize = 11,
+    TextColor3 = COLOR.Accent, Parent = searchRow,
+})
+roundBox(itemClear)
+listen(itemInput:GetPropertyChangedSignal("Text"), function()
+    if not alive then return end
+    CFG.ItemQuery = itemInput.Text:sub(1, 100)
+    queueItemScan()
+    scheduleSave()
+end)
+listen(itemClear.MouseButton1Click, function() itemInput.Text = "" end)
+refreshUI[#refreshUI + 1] = function()
+    if itemInput.Text ~= CFG.ItemQuery then itemInput.Text = CFG.ItemQuery end
+    queueItemScan()
+end
+numberRow("Distancia objetos", "ItemMaxDistance", 200, 5000, 200, "")
+numberRow("Máximo de marcas", "ItemMaxMarkers", 5, 80, 5, "")
+local foundRow = row("Coincidencias")
+local foundLabel = make("TextLabel", {
+    Position = UDim2.new(1, -90, 0, 0), Size = UDim2.fromOffset(78, 32),
+    BackgroundTransparency = 1, Text = "0", TextColor3 = COLOR.Accent,
+    Font = Enum.Font.GothamMedium, TextSize = 11,
+    TextXAlignment = Enum.TextXAlignment.Right, Parent = foundRow,
+})
+itemStatus = function(count)
+    if alive and foundLabel and foundLabel.Parent then foundLabel.Text = tostring(count) end
+end
 toggle("Zoom", "Zoom", function(enabled) if not enabled then zoomOff() end end)
 keyRow()
 modeRow()
@@ -909,6 +1131,7 @@ actionRow("Recuperar ajustes", "CARGAR", function()
     setSaveStatus(message)
 end)
 
+queueItemScan()
 local minim = false
 listen(minBtn.MouseButton1Click, function()
     minim = not minim
@@ -949,6 +1172,8 @@ local function cleanup()
     for _, e in pairs(playerCache) do removeDrawings(e.d) end
     for _, e in pairs(npcCache) do removeDrawings(e.d) end
     for _, e in pairs(corpseCache) do removeDrawings(e.d) end
+    itemScanVersion = itemScanVersion + 1
+    clearItems()
     table.clear(playerCache)
     table.clear(npcCache)
     table.clear(corpseCache)
@@ -1011,6 +1236,10 @@ listen(RunService.RenderStepped, function(dt)
         for _, e in pairs(playerCache) do hide(e.d) end
         for _, e in pairs(npcCache) do hide(e.d) end
         for _, e in pairs(corpseCache) do hide(e.d) end
+        for _, e in pairs(itemCache) do
+            if e.label then e.label.Visible = false end
+            if e.dot then e.dot.Visible = false end
+        end
         return
     end
     local myRoot = rootPart(me.Character)
@@ -1029,4 +1258,5 @@ listen(RunService.RenderStepped, function(dt)
         if not model:IsDescendantOf(Workspace) then removeCorpse(model)
         else updateESP(e, model, nil, true, cam, origin) end
     end
+    updateItemESP(cam, origin)
 end)
