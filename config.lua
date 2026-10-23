@@ -28,7 +28,7 @@ local CFG = {
     PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
     DistanceFade = true, ShowBodies = true, HighlightTarget = true,
     AutoSave = true,
-    ItemESP = true, ItemContainers = true, ItemQuery = "", ItemMaxDistance = 2000, ItemMaxMarkers = 40,
+    ItemESP = true, ItemContainers = true, ItemQuery = "", ItemFilters = {}, ItemMaxDistance = 2000, ItemMaxMarkers = 40,
     Zoom = true, ZoomFOV = 25, ZoomKey = Enum.KeyCode.C, ZoomMode = "Hold",
     Aimbot = false, AimPlayers = true, AimNPC = true, AimEnemyOnly = false,
     AimKey = Enum.KeyCode.P, AimTrigger = "Key", AimMode = "Hold",
@@ -107,6 +107,17 @@ local function loadSettings()
         if typeof(default) == "EnumItem" and type(value) == "string" then
             local ok, code = pcall(function() return Enum.KeyCode[value] end)
             if ok and code and code ~= Enum.KeyCode.Unknown then CFG[key] = code end
+        elseif key == "ItemFilters" and type(value) == "table" then
+            local safe = {}
+            local n = 0
+            for term, label in pairs(value) do
+                if type(term) == "string" and type(label) == "string"
+                    and #term <= 100 and #label <= 120 and n < 20 then
+                    safe[term:lower()] = label
+                    n = n + 1
+                end
+            end
+            CFG.ItemFilters = safe
         elseif type(value) == type(default) then
             local limits = SETTINGS_LIMITS[key]
             local options = SETTINGS_OPTIONS[key]
@@ -370,12 +381,27 @@ local itemCache, containerMarkerCache = {}, {}
 local itemScanVersion = 0
 local itemLooseCount, itemContainedCount = 0, 0
 local itemStatus = function() end
+local renderItemFilters = function() end
+local itemFilterCandidates = {}
+local activeItemTerms = {}
+local itemScanInProgress = false
 local function itemCounts()
     itemStatus(string.format("%d suelo / %d cont.", itemLooseCount, itemContainedCount))
 end
-local function itemTerm()
-    return tostring(CFG.ItemQuery or ""):lower():match("^%s*(.-)%s*$") or ""
+-- Cada término separado por coma (o punto y coma) es una búsqueda independiente (OR).
+local function rebuildItemTerms()
+    local terms, seen = {}, {}
+    for chunk in tostring(CFG.ItemQuery or ""):gmatch("[^,;\n]+") do
+        local term = chunk:lower():match("^%s*(.-)%s*$") or ""
+        if term ~= "" and not seen[term] and #terms < 12 then
+            terms[#terms + 1] = term
+            seen[term] = true
+        end
+    end
+    activeItemTerms = terms
+    return terms
 end
+rebuildItemTerms()
 local function itemLabel(obj)
     for _, key in ipairs({"ItemName", "DisplayName", "LootName"}) do
         local v = obj:GetAttribute(key)
@@ -390,6 +416,9 @@ local function itemLabel(obj)
             if obj.Value ~= "" then return obj.Value end
         end
     end
+    if obj:IsA("ObjectValue") and obj.Value then
+        return obj.Value.Name
+    end
     return obj.Name
 end
 local function itemMatches(obj, term)
@@ -401,6 +430,27 @@ local function itemMatches(obj, term)
     end
     if obj:IsA("ObjectValue") and obj.Value then
         return obj.Value.Name:lower():find(term, 1, true) ~= nil
+    end
+    return false
+end
+-- Un resultado es válido si coincide con AL MENOS UNO de los términos.
+-- Si se elige una sugerencia exacta, solo ese término se restringe.
+local function itemMatchesSelectedTerm(obj, term)
+    if not itemMatches(obj, term) then return false end
+    local exact = CFG.ItemFilters[term]
+    if not exact or exact == "" then return true end
+    exact = exact:lower()
+    return itemLabel(obj):lower() == exact or obj.Name:lower() == exact
+end
+local function itemMatchesFilters(obj)
+    for _, term in ipairs(activeItemTerms) do
+        if itemMatchesSelectedTerm(obj, term) then return true end
+    end
+    return false
+end
+local function itemMatchesAnyTerm(obj)
+    for _, term in ipairs(activeItemTerms) do
+        if itemMatches(obj, term) then return true end
     end
     return false
 end
@@ -484,12 +534,43 @@ local function itemAlreadyRepresented(obj, term)
         -- La caja no representa a sus objetos; se muestran como contenido.
         if isContainerModel(ancestor) then break end
         if validItemType(ancestor) and not inventoryFolder(ancestor)
-            and itemMatches(ancestor, term) and not itemInCharacter(ancestor) then
+            and itemMatches(ancestor, term) and not itemInCharacter(ancestor)
+            and itemLabel(ancestor):lower() == itemLabel(obj):lower() then
             return true
         end
         ancestor = ancestor.Parent
     end
     return false
+end
+-- Registrar sugerencias disponibles en el mundo (incluidos contenedores replicados).
+local function registerItemCandidate(obj)
+    if not validItemType(obj) or not obj:IsDescendantOf(Workspace)
+        or itemInCharacter(obj) or isContainerModel(obj) or inventoryFolder(obj) then
+        return false
+    end
+    local container = containerForItem(obj)
+    if (obj:IsA("ValueBase") or obj:IsA("Folder")) and not container then
+        return false
+    end
+    if not (container or itemRepresentativePart(obj)) then return false end
+    local label = itemLabel(obj)
+    if label == "" or #label > 100 then return false end
+    local updated = false
+    for _, term in ipairs(activeItemTerms) do
+        if itemMatches(obj, term) and not itemAlreadyRepresented(obj, term) then
+            local candidates = itemFilterCandidates[term]
+            if not candidates then candidates = {}; itemFilterCandidates[term] = candidates end
+            local key = label:lower()
+            local candidate = candidates[key]
+            if candidate then
+                candidate.count = candidate.count + 1
+            else
+                candidates[key] = {name = label, count = 1}
+            end
+            updated = true
+        end
+    end
+    return updated
 end
 local function removeContainerMarker(container)
     local marker = containerMarkerCache[container]
@@ -522,9 +603,16 @@ end
 local function addItemEntry(obj)
     if not alive or not CFG.ItemESP or not obj or not validItemType(obj)
         or not obj:IsDescendantOf(Workspace) then return end
-    local term = itemTerm()
-    if not itemMatches(obj, term) or itemInCharacter(obj)
-        or itemAlreadyRepresented(obj, term) then return end
+    if not itemMatchesFilters(obj) or itemInCharacter(obj) then return end
+    -- Si dos términos coinciden, basta con que uno identifique un objeto distinto.
+    local independentMatch = false
+    for _, term in ipairs(activeItemTerms) do
+        if itemMatchesSelectedTerm(obj, term) and not itemAlreadyRepresented(obj, term) then
+            independentMatch = true
+            break
+        end
+    end
+    if not independentMatch then return end
     -- No etiquetar la propia caja como un ítem del interior.
     if isContainerModel(obj) or inventoryFolder(obj) then return end
     local container = containerForItem(obj)
@@ -543,36 +631,57 @@ local function scanItems()
     itemScanVersion = itemScanVersion + 1
     local version = itemScanVersion
     clearItems()
-    if not CFG.ItemESP or itemTerm() == "" then return end
+    itemFilterCandidates = {}
+    if #activeItemTerms == 0 then
+        itemScanInProgress = false
+        renderItemFilters()
+        return
+    end
     task.spawn(function()
         local objects = Workspace:GetDescendants()
         for i, obj in ipairs(objects) do
             if not alive or version ~= itemScanVersion then return end
-            if validItemType(obj) then addItemEntry(obj) end
+            if validItemType(obj) then
+                registerItemCandidate(obj)
+                if CFG.ItemESP then addItemEntry(obj) end
+            end
             if i % 450 == 0 then task.wait() end
         end
-        if version == itemScanVersion and alive then itemCounts() end
+        if version == itemScanVersion and alive then
+            itemScanInProgress = false
+            itemCounts()
+            renderItemFilters()
+        end
     end)
 end
 local function queueItemScan()
     itemScanVersion = itemScanVersion + 1
     local version = itemScanVersion
     clearItems()
-    if not CFG.ItemESP or itemTerm() == "" then return end
+    rebuildItemTerms()
+    itemFilterCandidates = {}
+    itemScanInProgress = #activeItemTerms > 0
+    renderItemFilters()
+    if #activeItemTerms == 0 then return end
     task.delay(0.45, function()
         if alive and version == itemScanVersion then scanItems() end
     end)
 end
 listen(Workspace.DescendantAdded, function(obj)
-    if not alive or not CFG.ItemESP or itemTerm() == "" or not validItemType(obj)
-        or not itemMatches(obj, itemTerm()) then return end
+    if not alive or #activeItemTerms == 0 or not validItemType(obj)
+        or not itemMatchesAnyTerm(obj) then return end
     task.delay(0.2, function()
-        if alive and CFG.ItemESP then addItemEntry(obj) end
+        if not alive or not obj:IsDescendantOf(Workspace) then return end
+        if registerItemCandidate(obj) then renderItemFilters() end
+        if CFG.ItemESP then addItemEntry(obj) end
     end)
 end)
 listen(Workspace.DescendantRemoving, function(obj)
     if itemCache[obj] then removeItemEntry(obj) end
     if containerMarkerCache[obj] then removeContainerMarker(obj) end
+    if #activeItemTerms > 0 and validItemType(obj) and itemMatchesAnyTerm(obj) then
+        queueItemScan()
+    end
 end)
 local function makeItemLabel()
     local label = draw("Text")
@@ -610,7 +719,7 @@ local function truncateText(value, length)
     return #value > length and (value:sub(1, length - 3) .. "...") or value
 end
 local function updateItemESP(cam, origin)
-    if not CFG.ItemESP or itemTerm() == "" then return end
+    if not CFG.ItemESP or #activeItemTerms == 0 then return end
     local visible, groups = {}, {}
     for obj, e in pairs(itemCache) do
         if not obj:IsDescendantOf(Workspace) or itemInCharacter(obj) then
@@ -1219,7 +1328,7 @@ local itemInput = make("TextBox", {
     Position = UDim2.fromOffset(9, 29), Size = UDim2.new(1, -58, 0, 27),
     BackgroundColor3 = COLOR.UI, BorderSizePixel = 0,
     Text = CFG.ItemQuery, ClearTextOnFocus = false,
-    PlaceholderText = "Ej: rifle, medkit, ammo...",
+    PlaceholderText = "Ej: skull, ATC key",
     PlaceholderColor3 = COLOR.Muted, TextColor3 = COLOR.Text,
     Font = Enum.Font.Gotham, TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left, Parent = searchRow,
@@ -1234,7 +1343,7 @@ local itemClear = make("TextButton", {
 roundBox(itemClear)
 listen(itemInput:GetPropertyChangedSignal("Text"), function()
     if not alive then return end
-    CFG.ItemQuery = itemInput.Text:sub(1, 100)
+    CFG.ItemQuery = itemInput.Text:sub(1, 250)
     queueItemScan()
     scheduleSave()
 end)
@@ -1243,6 +1352,106 @@ refreshUI[#refreshUI + 1] = function()
     if itemInput.Text ~= CFG.ItemQuery then itemInput.Text = CFG.ItemQuery end
     queueItemScan()
 end
+-- Selector opcional por término. "Todos" conserva la coincidencia parcial,
+-- o se escoge exactamente uno de los nombres disponibles para ese término.
+local filterCard = make("Frame", {
+    Size = UDim2.new(1, -3, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundColor3 = COLOR.Panel, BorderSizePixel = 0, Parent = scroll,
+})
+roundBox(filterCard)
+make("UIPadding", {PaddingTop = UDim.new(0, 7), PaddingBottom = UDim.new(0, 7),
+    PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), Parent = filterCard})
+make("UIListLayout", {Padding = UDim.new(0, 4), Parent = filterCard})
+make("TextLabel", {
+    Size = UDim2.new(1, 0, 0, 22), BackgroundTransparency = 1,
+    Text = "¿A qué ítem te refieres?", Font = Enum.Font.GothamSemibold,
+    TextSize = 11, TextColor3 = COLOR.Accent,
+    TextXAlignment = Enum.TextXAlignment.Left, Parent = filterCard,
+})
+local filterOptions = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundTransparency = 1, Parent = filterCard,
+})
+make("UIListLayout", {Padding = UDim.new(0, 3), Parent = filterOptions})
+local function filterLabel(text, color)
+    return make("TextLabel", {
+        Size = UDim2.new(1, -2, 0, 21), BackgroundTransparency = 1,
+        Text = text, TextColor3 = color or COLOR.Muted,
+        Font = Enum.Font.Gotham, TextSize = 10,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = filterOptions,
+    })
+end
+local function filterButton(term, itemName, count)
+    local selected = CFG.ItemFilters[term]
+    local active = (itemName == nil and (not selected or selected == ""))
+        or (itemName ~= nil and selected and selected:lower() == itemName:lower())
+    local caption = itemName or "Todos los que coincidan"
+    if count then caption = caption .. " (" .. tostring(count) .. ")" end
+    local button = make("TextButton", {
+        Size = UDim2.new(1, -2, 0, 25), BackgroundColor3 = active and RGB(32, 113, 102) or COLOR.UI,
+        BorderSizePixel = 0, Text = (active and "✓ " or "  ") .. caption,
+        Font = Enum.Font.GothamMedium, TextSize = 10,
+        TextColor3 = active and COLOR.Accent or COLOR.Text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextTruncate = Enum.TextTruncate.AtEnd, Parent = filterOptions,
+    })
+    roundBox(button)
+    -- Esta conexión se destruye automáticamente junto con el botón temporal.
+    button.MouseButton1Click:Connect(function()
+        CFG.ItemFilters[term] = itemName
+        scheduleSave()
+        queueItemScan()
+    end)
+end
+renderItemFilters = function()
+    if not alive or not filterOptions or not filterOptions.Parent then return end
+    for _, obj in ipairs(filterOptions:GetChildren()) do
+        if obj:IsA("GuiObject") then obj:Destroy() end
+    end
+    if #activeItemTerms == 0 then
+        filterLabel("Escribe nombres separados por comas.")
+        return
+    end
+    for _, term in ipairs(activeItemTerms) do
+        filterLabel("Filtro: " .. term, COLOR.Accent)
+        local candidates = itemFilterCandidates[term] or {}
+        local options, total = {}, 0
+        for _, option in pairs(candidates) do
+            options[#options + 1] = option
+            total = total + option.count
+        end
+        table.sort(options, function(a, b)
+            if a.count ~= b.count then return a.count > b.count end
+            return a.name:lower() < b.name:lower()
+        end)
+        filterButton(term, nil, total > 0 and total or nil)
+        local limit = 9
+        local picked = CFG.ItemFilters[term]
+        if picked and picked ~= "" then
+            local displayed = false
+            local pickedCount = nil
+            for i, candidate in ipairs(options) do
+                if candidate.name:lower() == picked:lower() then
+                    pickedCount = candidate.count
+                    if i <= limit then displayed = true end
+                    break
+                end
+            end
+            if not displayed then filterButton(term, picked, pickedCount) end
+        end
+        for i = 1, math.min(#options, limit) do
+            local option = options[i]
+            filterButton(term, option.name, option.count)
+        end
+        if #options > limit then
+            filterLabel("+" .. tostring(#options - limit) .. " más; escribe un nombre más preciso.")
+        elseif #options == 0 then
+            filterLabel(itemScanInProgress and "Buscando coincidencias..." or "Sin coincidencias visibles")
+        end
+    end
+end
+renderItemFilters()
 numberRow("Distancia objetos", "ItemMaxDistance", 200, 5000, 200, "")
 numberRow("Máximo de marcas", "ItemMaxMarkers", 5, 80, 5, "")
 local foundRow = row("Resultados de búsqueda")
