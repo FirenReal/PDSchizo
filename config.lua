@@ -8,6 +8,7 @@ local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
 local CoreGui = game:GetService("CoreGui")
 local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local me = Players.LocalPlayer
 if not me then return end
 
@@ -28,6 +29,7 @@ local CFG = {
     PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
     DistanceFade = true, ShowBodies = true, HighlightTarget = true,
     AutoSave = true,
+    NoRecoil = false, RecoilPercent = 0,
     ItemESP = true, ItemContainers = true, ItemQuery = "", ItemFilters = {}, ItemMaxDistance = 2000, ItemMaxMarkers = 40,
     Zoom = true, ZoomFOV = 25, ZoomKey = Enum.KeyCode.C, ZoomMode = "Hold",
     Aimbot = false, AimPlayers = true, AimNPC = true, AimEnemyOnly = false,
@@ -58,6 +60,7 @@ local SETTINGS_LIMITS = {
     ZoomFOV = {5, 90}, AimFOVRadius = {20, 500},
     AimMaxDistance = {200, 5000}, AimSmooth = {0.05, 0.95},
     ItemMaxDistance = {200, 5000}, ItemMaxMarkers = {5, 80},
+    RecoilPercent = {0, 100},
 }
 local SETTINGS_OPTIONS = {
     BoxMode = {Full = true, Corners = true},
@@ -156,6 +159,74 @@ local function listen(signal, fn)
     connections[#connections + 1] = c
     return c
 end
+-- Control de retroceso para armas que utilizan el atributo replicado
+-- ReplicatedStorage.AmmoTypes.*.RecoilStrength.
+-- No modifica armas cuyo retroceso está definido en otros módulos.
+local recoilOriginals = setmetatable({}, {__mode = "k"})
+local recoilWatched = setmetatable({}, {__mode = "k"})
+local ammoFolder = nil
+
+local function recoilDesired(original)
+    if not CFG.NoRecoil then return original end
+    local multiplier = clamp(CFG.RecoilPercent, 0, 100) / 100
+    local n = tonumber(original)
+    if not n then return original end
+    local result = n * multiplier
+    return type(original) == "string" and tostring(result) or result
+end
+
+local function applyRecoilNode(node)
+    if not node or not node.Parent then return end
+    local original = recoilOriginals[node]
+    if original == nil then return end
+    local target = recoilDesired(original)
+    if node:GetAttribute("RecoilStrength") ~= target then
+        pcall(function() node:SetAttribute("RecoilStrength", target) end)
+    end
+end
+
+local function applyRecoilSettings()
+    for node in pairs(recoilOriginals) do
+        applyRecoilNode(node)
+    end
+end
+
+local function watchRecoilNode(node)
+    if recoilWatched[node] then return end
+    recoilWatched[node] = true
+    local current = node:GetAttribute("RecoilStrength")
+    if current ~= nil and tonumber(current) then
+        recoilOriginals[node] = current
+    end
+    listen(node:GetAttributeChangedSignal("RecoilStrength"), function()
+        if not alive then return end
+        local value = node:GetAttribute("RecoilStrength")
+        if recoilOriginals[node] == nil and value ~= nil and tonumber(value) then
+            recoilOriginals[node] = value
+        end
+        if CFG.NoRecoil then applyRecoilNode(node) end
+    end)
+    if CFG.NoRecoil then applyRecoilNode(node) end
+end
+
+local function attachAmmoFolder(folder)
+    if not folder or ammoFolder == folder then return end
+    ammoFolder = folder
+    watchRecoilNode(folder)
+    for _, node in ipairs(folder:GetDescendants()) do watchRecoilNode(node) end
+    listen(folder.DescendantAdded, watchRecoilNode)
+end
+
+attachAmmoFolder(ReplicatedStorage:FindFirstChild("AmmoTypes"))
+listen(ReplicatedStorage.ChildAdded, function(node)
+    if node.Name == "AmmoTypes" then attachAmmoFolder(node) end
+end)
+
+local function restoreRecoil()
+    CFG.NoRecoil = false
+    applyRecoilSettings()
+end
+
 local function humanoid(model)
     return model and model:FindFirstChildOfClass("Humanoid")
 end
@@ -1201,6 +1272,8 @@ local function numberRow(label, key, minValue, maxValue, step, suffix)
         if key == "ZoomFOV" and zoomActive then
             local cam = Workspace.CurrentCamera
             if cam then cam.FieldOfView = CFG.ZoomFOV end
+        elseif key == "RecoilPercent" then
+            applyRecoilSettings()
         end
         if delta ~= 0 then scheduleSave() end
     end
@@ -1468,6 +1541,9 @@ toggle("Zoom", "Zoom", function(enabled) if not enabled then zoomOff() end end)
 keyRow()
 modeRow()
 numberRow("Zoom FOV", "ZoomFOV", 5, 90, 5, "°")
+-- Combate: 0% de retroceso restante = sin recoil.
+toggle("No Recoil", "NoRecoil", function() applyRecoilSettings() end)
+numberRow("Recoil restante", "RecoilPercent", 0, 100, 5, "%")
 -- Aimbot: nunca cambia de objetivo dentro de una misma activación.
 toggle("Aimbot", "Aimbot", function(enabled) if not enabled then stopAim() end end)
 toggle("Aim jugadores", "AimPlayers", stopAim)
@@ -1520,6 +1596,7 @@ actionRow("Recuperar ajustes", "CARGAR", function()
     if ok then
         zoomOff()
         stopAim()
+        applyRecoilSettings()
         refreshAll()
     end
     setSaveStatus(message)
@@ -1557,6 +1634,7 @@ end)
 local function cleanup()
     if not alive then return end
     if CFG.AutoSave then saveSettings() end
+    restoreRecoil()
     alive = false
     zoomOff()
     stopAim()
