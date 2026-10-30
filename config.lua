@@ -1,4 +1,4 @@
--- RSWA Project Delta | revision de estabilidad 2026-10-30
+-- RSWA Project Delta | ESP mejorado 2026-10-30
 -- No probado en Project Delta. Sin evasion ni garantia contra baneos.
 -- Conserva las dependencias externas del original; no instala ejecutores.
 -- El aimbot NO cambia a otro objetivo al morir el seleccionado.
@@ -41,6 +41,7 @@ local CFG = {
     ESP = true, Players = true, NPC = true,
     Names = true, Health = true, Distance = true,
     Boxes = true, HeadDot = true, HealthBar = true,
+    HealthMode = "Percent", ESPVisibleOnly = false, ESPFadeOccluded = false, ESPMaxEntities = 60,
     TeamFilter = false, MaxDistance = 2200, UpdateHz = 25,
     BoxMode = "Corners", TextSize = 13, DotSize = 4,
     PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
@@ -77,15 +78,16 @@ local SETTINGS_LIMITS = {
     ZoomFOV = {5, 90}, AimFOVRadius = {20, 500},
     AimMaxDistance = {200, 5000}, AimSmooth = {0.05, 0.95},
     ItemMaxDistance = {200, 5000}, ItemMaxMarkers = {5, 80},
-    RecoilPercent = {0, 100},
+    RecoilPercent = {0, 100}, ESPMaxEntities = {10, 120},
 }
 local INTEGER_SETTINGS = {
     MaxDistance=true, UpdateHz=true, TextSize=true, DotSize=true,
     ZoomFOV=true, AimFOVRadius=true, AimMaxDistance=true,
-    ItemMaxDistance=true, ItemMaxMarkers=true, RecoilPercent=true,
+    ItemMaxDistance=true, ItemMaxMarkers=true, RecoilPercent=true, ESPMaxEntities=true,
 }
 local SETTINGS_OPTIONS = {
     BoxMode = {Full = true, Corners = true},
+    HealthMode = {Percent = true, Absolute = true},
     PlayerPalette = {Yellow=true,Blue=true,Red=true,Green=true,Purple=true,White=true,Gray=true},
     NPCPalette = {Yellow=true,Blue=true,Red=true,Green=true,Purple=true,White=true,Gray=true},
     DeadPalette = {Yellow=true,Blue=true,Red=true,Green=true,Purple=true,White=true,Gray=true},
@@ -333,8 +335,8 @@ local function updateCorners(d, x, y, width, height, color, transparency)
             d.corners[i] = l
         end
     end
-    local rx, ry = math.min(22, math.max(5, width * 0.26)),
-        math.min(22, math.max(5, height * 0.20))
+    local rx, ry = math.min(width * 0.5, 22, math.max(2, width * 0.26)),
+        math.min(height * 0.5, 22, math.max(2, height * 0.20))
     local right, bottom = x + width, y + height
     local coords = {
         {x, y, x + rx, y}, {x, y, x, y + ry},
@@ -937,139 +939,248 @@ local function updateItemESP(cam, origin)
     end
 end
 
+-- Geometria corporal en coordenadas de la raiz; se reutiliza entre actualizaciones.
+local ESP_BODY_NAMES = {
+    Head=true, HumanoidRootPart=true, Torso=true, UpperTorso=true, LowerTorso=true,
+    ["Left Arm"]=true, ["Right Arm"]=true, ["Left Leg"]=true, ["Right Leg"]=true,
+    LeftUpperArm=true, LeftLowerArm=true, LeftHand=true,
+    RightUpperArm=true, RightLowerArm=true, RightHand=true,
+    LeftUpperLeg=true, LeftLowerLeg=true, LeftFoot=true,
+    RightUpperLeg=true, RightLowerLeg=true, RightFoot=true,
+}
+local ESP_SIGNS = {
+    V3(-1,-1,-1), V3(1,-1,-1), V3(-1,1,-1), V3(1,1,-1),
+    V3(-1,-1,1), V3(1,-1,1), V3(-1,1,1), V3(1,1,1),
+}
+local ESP_EDGES = {
+    {1,2},{1,3},{2,4},{3,4},{5,6},{5,7},{6,8},{7,8},
+    {1,5},{2,6},{3,7},{4,8},
+}
+local function espBodyBounds(entry, model, root)
+    local now = os.clock()
+    if not entry.bounds or entry.boundsRoot ~= root or now - entry.boundsTime >= 0.2 then
+        local low = V3(math.huge,math.huge,math.huge)
+        local high = V3(-math.huge,-math.huge,-math.huge)
+        local count = 0
+        for _, part in ipairs(model:GetChildren()) do
+            if part:IsA("BasePart") and ESP_BODY_NAMES[part.Name] then
+                local relative = root.CFrame:ToObjectSpace(part.CFrame)
+                local half = part.Size * 0.5
+                for _, sign in ipairs(ESP_SIGNS) do
+                    local v = relative:PointToWorldSpace(half * sign)
+                    low = V3(math.min(low.X,v.X),math.min(low.Y,v.Y),math.min(low.Z,v.Z))
+                    high = V3(math.max(high.X,v.X),math.max(high.Y,v.Y),math.max(high.Z,v.Z))
+                end
+                if part.Name ~= "HumanoidRootPart" then count = count + 1 end
+            end
+        end
+        local offset, size
+        if count > 0 then
+            offset, size = CFrame.new((low + high) * 0.5), high - low
+        else
+            local ok, cf, bounds = pcall(function() return model:GetBoundingBox() end)
+            if not ok then return nil end
+            offset, size = root.CFrame:ToObjectSpace(cf), bounds
+        end
+        entry.bounds = {offset=offset,size=size}
+        entry.boundsRoot, entry.boundsTime = root, now
+    end
+    return root.CFrame * entry.bounds.offset, entry.bounds.size
+end
+
+-- Recortar las aristas contra un plano delante de la camara evita proyecciones
+-- invertidas cuando una parte del personaje queda detras del observador.
+local function espScreenBounds(entry, model, root, camera)
+    local cf, size = espBodyBounds(entry, model, root)
+    if not cf then return nil end
+    local half, near = size * 0.5, 0.1
+    local points, depth = {}, {}
+    local minX,maxX,minY,maxY = math.huge,-math.huge,math.huge,-math.huge
+    local count = 0
+    local function include(world)
+        local p = camera:WorldToViewportPoint(world)
+        if p.Z <= 0 then return end
+        minX,maxX = math.min(minX,p.X),math.max(maxX,p.X)
+        minY,maxY = math.min(minY,p.Y),math.max(maxY,p.Y)
+        count = count + 1
+    end
+    for index,sign in ipairs(ESP_SIGNS) do
+        local world = cf:PointToWorldSpace(half * sign)
+        points[index] = world
+        depth[index] = -camera.CFrame:PointToObjectSpace(world).Z
+        if depth[index] >= near then include(world) end
+    end
+    for _,edge in ipairs(ESP_EDGES) do
+        local a,b = edge[1],edge[2]
+        if (depth[a] >= near) ~= (depth[b] >= near) then
+            local t = (near-depth[a]) / (depth[b]-depth[a])
+            include(points[a]:Lerp(points[b],t))
+        end
+    end
+    local viewport = camera.ViewportSize
+    if count == 0 or maxX < 0 or minX > viewport.X or maxY < 0 or minY > viewport.Y then return nil end
+    local left,right = clamp(minX,1,viewport.X-1),clamp(maxX,1,viewport.X-1)
+    local top,bottom = clamp(minY,1,viewport.Y-1),clamp(maxY,1,viewport.Y-1)
+    if right-left < 1 or bottom-top < 1 then return nil end
+    return {left=left,right=right,top=top,bottom=bottom,width=right-left,height=bottom-top,center=(left+right)*0.5}
+end
+
+local espRayParams = RaycastParams.new()
+espRayParams.FilterType = Enum.RaycastFilterType.Exclude
+local function espLineOfSight(entry, model, root, camera)
+    local now = os.clock()
+    local cameraPosition, targetPosition = camera.CFrame.Position, root.Position
+    if not entry.sightTime or now-entry.sightTime >= 0.15
+        or (entry.sightCamera-cameraPosition).Magnitude > 2
+        or (entry.sightTarget-targetPosition).Magnitude > 2 then
+        local excluded = {camera}
+        if me.Character then excluded[#excluded+1] = me.Character end
+        espRayParams.FilterDescendantsInstances = excluded
+        local hit = Workspace:Raycast(cameraPosition,targetPosition-cameraPosition,espRayParams)
+        entry.sightVisible = not hit or hit.Instance:IsDescendantOf(model)
+        entry.sightTime,entry.sightCamera,entry.sightTarget = now,cameraPosition,targetPosition
+    end
+    return entry.sightVisible
+end
+
+local function espCaption(value, limit)
+    value = tostring(value):gsub("[%c]", " ")
+    local ok, offset = pcall(utf8.offset,value,limit+1)
+    if ok then return offset and value:sub(1,offset-1).."..." or value end
+    value = value:gsub("[^%w%s%p]", "?")
+    return #value > limit and value:sub(1,limit).."..." or value
+end
+local function espTextX(caption, size, desired, viewportWidth)
+    local count = utf8.len(caption) or #caption
+    local margin = math.min(viewportWidth*0.5, math.max(8,count*size*0.29))
+    return clamp(desired,margin,viewportWidth-margin)
+end
+
 -- Compartido por la selección fija del aimbot y el ESP.
 local lockedTarget = nil
 local function updateESP(e, model, p, npc, cam, origin)
     local d = e.d
     if not CFG.ESP or (npc and not e.dead and not CFG.NPC) or (not npc and not CFG.Players)
-        or not model or not model.Parent
+        or not model or model == me.Character or not model:IsDescendantOf(Workspace)
         or (p and CFG.TeamFilter and sameTeam(p))
         or (npc and not e.dead and Players:GetPlayerFromCharacter(model)) then
-        hide(d)
-        return
+        hide(d); return false
     end
-    -- Las referencias se actualizan al reaparecer el personaje.
     if e.model ~= model then
-        e.model, e.hum, e.head, e.root = model, nil, nil, nil
+        e.model,e.hum,e.head,e.root = model,nil,nil,nil
+        e.bounds,e.sightTime = nil,nil
     end
-    if not e.hum or not e.hum:IsDescendantOf(model) then e.hum = humanoid(model) end
-    if not e.head or not e.head:IsDescendantOf(model) then e.head = head(model) end
-    if not e.root or not e.root:IsDescendantOf(model) then e.root = rootPart(model) end
-    local hum, h, r = e.hum, e.head, e.root
-    local isDead = e.dead or (hum and hum.Health <= 0)
-    if (isDead and not CFG.ShowBodies) or (not isDead and not hum)
-        or (not isDead and (not h or not r)) then
-        hide(d)
-        return
-    end
-    if isDead and not r then r = bodyPart(model) end
-    if not r then hide(d); return end
-    local dist = (r.Position - origin).Magnitude
-    if dist > CFG.MaxDistance then hide(d); return end
-
-    local upper, lower, height, width, center, left, head2d
-    if isDead then
-        -- Se calculan los límites del ragdoll completo, incluso si yace en el suelo.
-        local ok, cf, bounds = pcall(function() return model:GetBoundingBox() end)
-        if not ok then hide(d); return end
-        local half = bounds * 0.5
-        local minX, maxX, minY, maxY = math.huge, -math.huge, math.huge, -math.huge
-        local count = 0
-        for _, x in ipairs({-1, 1}) do
-            for _, y in ipairs({-1, 1}) do
-                for _, z in ipairs({-1, 1}) do
-                    local wp = cf:PointToWorldSpace(V3(x * half.X, y * half.Y, z * half.Z))
-                    local pt = cam:WorldToViewportPoint(wp)
-                    if pt.Z > 0 then
-                        count = count + 1
-                        minX, maxX = math.min(minX, pt.X), math.max(maxX, pt.X)
-                        minY, maxY = math.min(minY, pt.Y), math.max(maxY, pt.Y)
-                    end
-                end
-            end
-        end
-        local viewport = cam.ViewportSize
-        if count == 0 or maxX < 0 or minX > viewport.X
-            or maxY < 0 or minY > viewport.Y then hide(d); return end
-        left = clamp(minX, 0, viewport.X)
-        local right = clamp(maxX, 0, viewport.X)
-        upper, lower = clamp(minY, 0, viewport.Y), clamp(maxY, 0, viewport.Y)
-        width, height = math.max(right - left, 9), math.max(lower - upper, 14)
-        center = left + width * 0.5
-        local headPoint = h and projected(cam, h.Position)
-        head2d = headPoint or projected(cam, cf.Position) or V2(center, upper + height * 0.5)
-    else
-        local top = projected(cam, h.Position + V3(0, h.Size.Y * 0.5, 0))
-        local bottom = projected(cam, r.Position - V3(0, 2.8, 0))
-        head2d = projected(cam, h.Position)
-        if not top or not bottom or not head2d then hide(d); return end
-        upper, lower = math.min(top.Y, bottom.Y), math.max(top.Y, bottom.Y)
-        height = math.max(lower - upper, 14)
-        width = height * 0.46
-        center = (top.X + bottom.X) * 0.5
-        left = center - width / 2
-    end
-
-    local hp = isDead and 0 or clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-    local c = npc and PALETTE[CFG.NPCPalette]
-        or (p and sameTeam(p) and COLOR.Ally or PALETTE[CFG.PlayerPalette])
-    if isDead then
-        c = PALETTE[CFG.DeadPalette]
-    elseif CFG.HighlightTarget and model == lockedTarget then
-        c = COLOR.Target
-    end
-    local opacity = CFG.DistanceFade
-        and clamp(1 - 0.72 * (dist / math.max(CFG.MaxDistance, 1)) ^ 2, 0.28, 1)
-        or 1
-    if not d then
-        d = makeDrawings()
-        e.d = d
-    end
+    if not e.hum or not e.hum:IsDescendantOf(model) then e.hum=humanoid(model) end
+    if not e.head or not e.head:IsDescendantOf(model) then e.head=head(model) end
+    if not e.root or not e.root:IsDescendantOf(model) then e.root=rootPart(model) end
+    local hum,h,r = e.hum,e.head,e.root
+    local isDead = e.dead or (hum and hum.Health<=0)
+    if (isDead and not CFG.ShowBodies) or (not isDead and not hum) then hide(d);return false end
+    if not r and isDead then r=bodyPart(model) end
+    if not r then hide(d);return false end
+    local dist = (r.Position-origin).Magnitude
+    if dist>CFG.MaxDistance or cam.ViewportSize.X<4 or cam.ViewportSize.Y<4 then hide(d);return false end
+    local rect=espScreenBounds(e,model,r,cam)
+    if not rect then hide(d);return false end
+    local lineOfSight=true
+    if CFG.ESPVisibleOnly or CFG.ESPFadeOccluded then lineOfSight=espLineOfSight(e,model,r,cam) end
+    if CFG.ESPVisibleOnly and not lineOfSight then hide(d);return false end
+    local maxHP=hum and math.max(hum.MaxHealth,1) or 1
+    local actualHP=isDead and 0 or math.max(0,hum.Health)
+    local hp=clamp(actualHP/maxHP,0,1)
+    local color=npc and PALETTE[CFG.NPCPalette] or (p and sameTeam(p) and COLOR.Ally or PALETTE[CFG.PlayerPalette])
+    if isDead then color=PALETTE[CFG.DeadPalette]
+    elseif CFG.HighlightTarget and model==lockedTarget then color=COLOR.Target end
+    local opacity=CFG.DistanceFade and clamp(1-.72*(dist/math.max(CFG.MaxDistance,1))^2,.28,1) or 1
+    if CFG.ESPFadeOccluded and not lineOfSight then opacity=opacity*.35 end
+    if not d then d=makeDrawings();e.d=d end
     if CFG.Boxes then
-        if CFG.BoxMode == "Corners" then
-            d.box.Visible = false
-            updateCorners(d, left, upper, width, height, c, opacity)
+        if CFG.BoxMode=="Corners" then
+            d.box.Visible=false
+            updateCorners(d,rect.left,rect.top,rect.width,rect.height,color,opacity)
         else
-            if d.corners then
-                for _, line in ipairs(d.corners) do line.Visible = false end
-            end
-            d.box.Position, d.box.Size = V2(left, upper), V2(width, height)
-            d.box.Color, d.box.Transparency, d.box.Visible = c, opacity, true
+            if d.corners then for _,line in ipairs(d.corners) do line.Visible=false end end
+            d.box.Position,d.box.Size=V2(rect.left,rect.top),V2(rect.width,rect.height)
+            d.box.Color,d.box.Transparency,d.box.Visible=color,opacity,true
         end
     else
-        d.box.Visible = false
-        if d.corners then
-            for _, line in ipairs(d.corners) do line.Visible = false end
-        end
+        d.box.Visible=false
+        if d.corners then for _,line in ipairs(d.corners) do line.Visible=false end end
     end
+    local viewport=cam.ViewportSize
+    local nameY=clamp(rect.top-CFG.TextSize-5,2,math.max(2,viewport.Y-CFG.TextSize-2))
     if CFG.Names then
-        d.name.Text = isDead and ("[CUERPO] " .. (e.label or model.Name))
-            or (npc and model.Name or (p.DisplayName or p.Name))
-        d.name.Position, d.name.Color = V2(center, upper - 18), c
-        d.name.Size, d.name.Transparency, d.name.Visible = CFG.TextSize, opacity, true
-    else d.name.Visible = false end
+        local name=isDead and ("[CUERPO] "..(e.label or model.Name))
+            or (npc and ("[NPC] "..model.Name) or (p and (p.DisplayName or p.Name) or model.Name))
+        name=espCaption(name,32)
+        d.name.Text=name
+        d.name.Position=V2(espTextX(name,CFG.TextSize,rect.center,viewport.X),nameY)
+        d.name.Color,d.name.Size,d.name.Transparency,d.name.Visible=color,CFG.TextSize,opacity,true
+    else d.name.Visible=false end
     if CFG.Health or CFG.Distance then
-        local hpText = isDead and "MUERTO" or (tostring(math.floor(hp * 100 + 0.5)) .. "%")
-        local distanceText = tostring(math.floor(dist + 0.5)) .. " studs"
-        d.status.Text = CFG.Health and CFG.Distance and (hpText .. " | " .. distanceText)
-            or (CFG.Health and hpText or distanceText)
-        d.status.Position, d.status.Visible = V2(center, lower + 4), true
-        d.status.Size = math.max(9, CFG.TextSize - 2)
-        d.status.Transparency = opacity
-    else d.status.Visible = false end
-    if CFG.HeadDot then
-        d.dot.Position, d.dot.Color, d.dot.Visible = head2d, c, true
-        d.dot.Radius, d.dot.Transparency = CFG.DotSize, opacity
-    else d.dot.Visible = false end
-    if CFG.HealthBar then
-        local x = left - 6
-        d.barBg.From, d.barBg.To = V2(x, upper), V2(x, lower)
-        d.bar.From, d.bar.To = V2(x, lower), V2(x, lower - height * hp)
-        d.bar.Color = isDead and PALETTE[CFG.DeadPalette]
-            or RGB(245, 70, 70):Lerp(RGB(65, 245, 100), hp)
-        d.bar.Transparency = opacity
-        d.barBg.Visible, d.bar.Visible = true, true
-    else d.barBg.Visible, d.bar.Visible = false, false end
+        local hpText=isDead and "MUERTO" or (CFG.HealthMode=="Absolute"
+            and string.format("%.0f/%.0f HP",actualHP,maxHP) or string.format("%.0f%%",hp*100))
+        local distanceText=string.format("%.0f studs",dist)
+        local caption=CFG.Health and CFG.Distance and (hpText.." | "..distanceText) or (CFG.Health and hpText or distanceText)
+        local size=math.max(9,CFG.TextSize-2)
+        local y=rect.bottom+4
+        if y+size+2>viewport.Y then y=math.max(2,rect.bottom-size-3) end
+        if CFG.Names and math.abs(y-nameY)<size+2 then y=math.min(viewport.Y-size-2,nameY+CFG.TextSize+3) end
+        d.status.Text,d.status.Size=caption,size
+        d.status.Position=V2(espTextX(caption,size,rect.center,viewport.X),y)
+        d.status.Color,d.status.Transparency,d.status.Visible=COLOR.Text,opacity,true
+    else d.status.Visible=false end
+    local head2d=h and projected(cam,h.Position)
+    if CFG.HeadDot and head2d then
+        d.dot.Position,d.dot.Color,d.dot.Visible=head2d,color,true
+        d.dot.Radius,d.dot.Transparency=CFG.DotSize,opacity
+    else d.dot.Visible=false end
+    if CFG.HealthBar and rect.left>=8 then
+        local x=rect.left-6
+        d.barBg.From,d.barBg.To=V2(x,rect.top),V2(x,rect.bottom)
+        d.bar.From,d.bar.To=V2(x,rect.bottom),V2(x,rect.bottom-rect.height*hp)
+        d.bar.Color=RGB(245,70,70):Lerp(RGB(65,245,100),hp)
+        d.barBg.Transparency,d.bar.Transparency=opacity*.8,opacity
+        d.barBg.Visible,d.bar.Visible=true,hp>0
+    else d.barBg.Visible,d.bar.Visible=false,false end
+    return true
+end
+
+-- Presupuesto de entidades: las marcas lejanas ceden sitio a las cercanas;
+-- el objetivo seleccionado tiene prioridad y se limpian las marcas descartadas.
+local function updateEntityESP(cam,origin)
+    local entries={}
+    local function add(entry,model,player,npc)
+        if not model then hide(entry.d);return end
+        local root=rootPart(model) or (entry.dead and bodyPart(model))
+        if not root then hide(entry.d);return end
+        local delta=root.Position-origin
+        local distanceSquared=delta:Dot(delta)
+        if distanceSquared>CFG.MaxDistance*CFG.MaxDistance then hide(entry.d);return end
+        entries[#entries+1]={entry=entry,model=model,player=player,npc=npc,distance=distanceSquared}
+    end
+    for player,entry in pairs(playerCache) do
+        if corpseCache[player.Character] then hide(entry.d) else add(entry,player.Character,player,false) end
+    end
+    for model,entry in pairs(npcCache) do
+        if not model:IsDescendantOf(Workspace) or model==me.Character or Players:GetPlayerFromCharacter(model) then removeNPC(model)
+        elseif corpseCache[model] then hide(entry.d) else add(entry,model,nil,true) end
+    end
+    for model,entry in pairs(corpseCache) do
+        local hum=humanoid(model)
+        if not model:IsDescendantOf(Workspace) or (hum and hum.Health>0) then removeCorpse(model)
+        else add(entry,model,nil,true) end
+    end
+    table.sort(entries,function(a,b)
+        local aLocked,bLocked=a.model==lockedTarget,b.model==lockedTarget
+        if aLocked~=bLocked then return aLocked end
+        return a.distance<b.distance
+    end)
+    local rendered=0
+    for _,candidate in ipairs(entries) do
+        if rendered>=CFG.ESPMaxEntities then hide(candidate.entry.d)
+        elseif updateESP(candidate.entry,candidate.model,candidate.player,candidate.npc,cam,origin) then rendered=rendered+1 end
+    end
 end
 
 -- Aimbot: objetivo fijo durante cada pulsación/activación.
@@ -1415,11 +1526,14 @@ toggle("Distancia", "Distance")
 toggle("Cajas", "Boxes")
 toggle("Punto cabeza", "HeadDot")
 toggle("Barra vida", "HealthBar")
+toggle("ESP solo visibles", "ESPVisibleOnly")
+toggle("Atenuar tras obstaculos", "ESPFadeOccluded")
 toggle("Ocultar aliados (si Teams)", "TeamFilter")
 toggle("Desvanecer por distancia", "DistanceFade")
 toggle("Mostrar cuerpos", "ShowBodies")
 toggle("Marcar objetivo seleccionado", "HighlightTarget")
 aimCycleRow("Tipo de caja", "BoxMode", {"Corners", "Full"})
+aimCycleRow("Vida: porcentaje / HP", "HealthMode", {"Percent", "Absolute"})
 aimCycleRow("Color jugadores", "PlayerPalette", {"Yellow", "Blue", "Red", "Green", "Purple", "White", "Gray"})
 aimCycleRow("Color NPC", "NPCPalette", {"Blue", "Red", "Green", "Purple", "Yellow", "White", "Gray"})
 aimCycleRow("Color muertos", "DeadPalette", {"Gray", "Red", "Purple", "White", "Blue", "Yellow", "Green"})
@@ -1427,6 +1541,7 @@ numberRow("Tamaño nombre", "TextSize", 10, 20, 1, "")
 numberRow("Tamaño punto", "DotSize", 2, 10, 1, "")
 numberRow("Distancia ESP", "MaxDistance", 200, 5000, 200, "")
 numberRow("ESP Hz", "UpdateHz", 10, 60, 5, "")
+numberRow("Max entidades ESP", "ESPMaxEntities", 10, 120, 10, "")
 -- Búsqueda de objetos: admite coincidencias parciales sin distinguir mayúsculas.
 toggle("ESP objetos", "ItemESP", function() queueItemScan() end)
 toggle("Ítems en contenedores", "ItemContainers")
@@ -1771,20 +1886,6 @@ listen(RunService.RenderStepped, function(dt)
     end
     local myRoot = rootPart(me.Character)
     local origin = myRoot and myRoot.Position or cam.CFrame.Position
-    for p, e in pairs(playerCache) do
-        if corpseCache[p.Character] then hide(e.d)
-        else updateESP(e, p.Character, p, false, cam, origin) end
-    end
-    for model, e in pairs(npcCache) do
-        if not model:IsDescendantOf(Workspace) or model == me.Character or Players:GetPlayerFromCharacter(model) then
-            removeNPC(model)
-        elseif corpseCache[model] then hide(e.d)
-        else updateESP(e, model, nil, true, cam, origin) end
-    end
-    for model, e in pairs(corpseCache) do
-        local hum = humanoid(model)
-        if not model:IsDescendantOf(Workspace) or (hum and hum.Health > 0) then removeCorpse(model)
-        else updateESP(e, model, nil, true, cam, origin) end
-    end
+    updateEntityESP(cam, origin)
     updateItemESP(cam, origin)
 end)
