@@ -1,4 +1,6 @@
--- RSWA Project Delta | ESP + Zoom + Aimbot con bloqueo de objetivo
+-- RSWA Project Delta | revision de estabilidad 2026-10-30
+-- No probado en Project Delta. Sin evasion ni garantia contra baneos.
+-- Conserva las dependencias externas del original; no instala ejecutores.
 -- El aimbot NO cambia a otro objetivo al morir el seleccionado.
 -- Compatibilidad: modelos replicados con Humanoid + Head (R6/R15/custom).
 
@@ -6,7 +8,7 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
+local PlayerGui = nil
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local me = Players.LocalPlayer
@@ -18,6 +20,21 @@ if type(draw) ~= "function" then
     return
 end
 
+-- Cerrar la instancia anterior antes de cargar ajustes o tocar atributos.
+local okEnv, env = pcall(function()
+    if type(getgenv) == "function" then return getgenv() end
+    return _G
+end)
+if okEnv and type(env) == "table" then
+    local previousStop = env.RSWA_PD_Stop
+    if type(previousStop) == "function" then
+        local stopped, reason = pcall(previousStop)
+        if not stopped then warn("RSWA: no se pudo cerrar la instancia anterior: " .. tostring(reason)); return end
+    end
+    env.RSWA_PD_Stop = nil
+end
+PlayerGui = me:WaitForChild("PlayerGui", 10)
+if not PlayerGui then warn("RSWA: PlayerGui no disponible"); return end
 local V2, V3, RGB = Vector2.new, Vector3.new, Color3.fromRGB
 local clamp = math.clamp
 local CFG = {
@@ -61,6 +78,11 @@ local SETTINGS_LIMITS = {
     AimMaxDistance = {200, 5000}, AimSmooth = {0.05, 0.95},
     ItemMaxDistance = {200, 5000}, ItemMaxMarkers = {5, 80},
     RecoilPercent = {0, 100},
+}
+local INTEGER_SETTINGS = {
+    MaxDistance=true, UpdateHz=true, TextSize=true, DotSize=true,
+    ZoomFOV=true, AimFOVRadius=true, AimMaxDistance=true,
+    ItemMaxDistance=true, ItemMaxMarkers=true, RecoilPercent=true,
 }
 local SETTINGS_OPTIONS = {
     BoxMode = {Full = true, Corners = true},
@@ -126,17 +148,24 @@ local function loadSettings()
             local options = SETTINGS_OPTIONS[key]
             if limits and type(value) == "number" and value == value
                 and value ~= math.huge and value ~= -math.huge then
-                CFG[key] = math.clamp(value, limits[1], limits[2])
+                local bounded = math.clamp(value, limits[1], limits[2])
+                CFG[key] = INTEGER_SETTINGS[key] and math.floor(bounded + 0.5) or bounded
             elseif options and options[value] then
                 CFG[key] = value
             elseif not limits and not options then
-                CFG[key] = value
+                if key == "ItemQuery" then
+                    CFG[key] = value:sub(1, 250)
+                else CFG[key] = value end
             end
         end
     end
     return true, "Configuración cargada"
 end
 local configLoaded, configMessage = loadSettings()
+if CFG.Aimbot and type(mousemoverel) ~= "function" then
+    CFG.Aimbot = false
+    warn("RSWA: apuntado desactivado; falta mousemoverel.")
+end
 
 local alive, connections = true, {}
 local saveRevision = 0
@@ -236,11 +265,12 @@ local function head(model)
 end
 local function rootPart(model)
     if not model then return nil end
-    return model:FindFirstChild("HumanoidRootPart")
-        or model:FindFirstChild("UpperTorso")
-        or model:FindFirstChild("Torso")
-        or model.PrimaryPart
-        or head(model)
+    for _, name in ipairs({"HumanoidRootPart", "UpperTorso", "Torso"}) do
+        local part = model:FindFirstChild(name)
+        if part and part:IsA("BasePart") then return part end
+    end
+    if model:IsA("Model") and model.PrimaryPart then return model.PrimaryPart end
+    return head(model)
 end
 local function projected(cam, position)
     local p, visible = cam:WorldToViewportPoint(position)
@@ -327,7 +357,7 @@ local function removePlayer(p)
     if e then removeDrawings(e.d); playerCache[p] = nil end
 end
 local function isNPC(model)
-    return model and model:IsA("Model") and humanoid(model) ~= nil
+    return model and model ~= me.Character and model:IsA("Model") and humanoid(model) ~= nil
         and head(model) ~= nil and not Players:GetPlayerFromCharacter(model)
 end
 local function addNPC(model)
@@ -454,6 +484,7 @@ local itemLooseCount, itemContainedCount = 0, 0
 local itemStatus = function() end
 local renderItemFilters = function() end
 local itemFilterCandidates = {}
+local itemCandidateSeen = setmetatable({}, {__mode = "k"})
 local activeItemTerms = {}
 local itemScanInProgress = false
 local function itemCounts()
@@ -536,7 +567,7 @@ local function itemInCharacter(obj)
             local hum = node:FindFirstChildOfClass("Humanoid")
             -- Permitir buscar dentro de restos que tengan Humanoid muerto,
             -- pero no dentro de inventarios de personajes activos.
-            if hum and (hum.Health > 0 or Players:GetPlayerFromCharacter(node)) then
+            if hum and hum.Health > 0 then
                 return true
             end
         end
@@ -631,7 +662,17 @@ local function registerItemCandidate(obj)
         if itemMatches(obj, term) and not itemAlreadyRepresented(obj, term) then
             local candidates = itemFilterCandidates[term]
             if not candidates then candidates = {}; itemFilterCandidates[term] = candidates end
+            local seen = itemCandidateSeen[obj]
+            if not seen then seen = {}; itemCandidateSeen[obj] = seen end
             local key = label:lower()
+            -- Evitar contar dos veces la instancia detectada por barrido y evento.
+            if seen[term] == key then continue end
+            local previousKey = seen[term]
+            if previousKey and candidates[previousKey] then
+                candidates[previousKey].count = candidates[previousKey].count - 1
+                if candidates[previousKey].count <= 0 then candidates[previousKey] = nil end
+            end
+            seen[term] = key
             local candidate = candidates[key]
             if candidate then
                 candidate.count = candidate.count + 1
@@ -703,6 +744,7 @@ local function scanItems()
     local version = itemScanVersion
     clearItems()
     itemFilterCandidates = {}
+    itemCandidateSeen = setmetatable({}, {__mode = "k"})
     if #activeItemTerms == 0 then
         itemScanInProgress = false
         renderItemFilters()
@@ -731,6 +773,7 @@ local function queueItemScan()
     clearItems()
     rebuildItemTerms()
     itemFilterCandidates = {}
+    itemCandidateSeen = setmetatable({}, {__mode = "k"})
     itemScanInProgress = #activeItemTerms > 0
     renderItemFilters()
     if #activeItemTerms == 0 then return end
@@ -741,8 +784,9 @@ end
 listen(Workspace.DescendantAdded, function(obj)
     if not alive or #activeItemTerms == 0 or not validItemType(obj)
         or not itemMatchesAnyTerm(obj) then return end
+    local version = itemScanVersion
     task.delay(0.2, function()
-        if not alive or not obj:IsDescendantOf(Workspace) then return end
+        if not alive or version ~= itemScanVersion or not obj:IsDescendantOf(Workspace) then return end
         if registerItemCandidate(obj) then renderItemFilters() end
         if CFG.ItemESP then addItemEntry(obj) end
     end)
@@ -1062,7 +1106,7 @@ end
 local function findAimTarget(cam, origin, cursor)
     local best, bestDist = nil, math.huge
     local function consider(model)
-        if not model or not model.Parent then return end
+        if not model or model == me.Character or not model:IsDescendantOf(Workspace) then return end
         local h, r = humanoid(model), rootPart(model)
         if not h or h.Health <= 0 or not r then return end
         local pos = aimPoint(model)
@@ -1165,11 +1209,11 @@ listen(UIS.InputEnded, function(input)
 end)
 
 -- UI compacta RSWA.
-local oldGui = CoreGui:FindFirstChild("RSWA_ProjectDelta")
+local oldGui = PlayerGui:FindFirstChild("RSWA_ProjectDelta")
 if oldGui then oldGui:Destroy() end
 local gui = Instance.new("ScreenGui")
 gui.Name, gui.IgnoreGuiInset, gui.ResetOnSpawn = "RSWA_ProjectDelta", true, false
-gui.Parent = CoreGui
+gui.Parent = PlayerGui
 local function make(class, props)
     local item = Instance.new(class)
     for k, v in pairs(props) do item[k] = v end
@@ -1545,7 +1589,13 @@ numberRow("Zoom FOV", "ZoomFOV", 5, 90, 5, "°")
 toggle("No Recoil", "NoRecoil", function() applyRecoilSettings() end)
 numberRow("Recoil restante", "RecoilPercent", 0, 100, 5, "%")
 -- Aimbot: nunca cambia de objetivo dentro de una misma activación.
-toggle("Aimbot", "Aimbot", function(enabled) if not enabled then stopAim() end end)
+toggle("Aimbot", "Aimbot", function(enabled)
+    if enabled and type(mousemoverel) ~= "function" then
+        CFG.Aimbot = false
+        warn("RSWA: apuntado no disponible; falta mousemoverel en este entorno.")
+    end
+    if not CFG.Aimbot then stopAim() end
+end)
 toggle("Aim jugadores", "AimPlayers", stopAim)
 toggle("Aim NPC / Bots", "AimNPC", stopAim)
 toggle("Aim solo enemigos", "AimEnemyOnly", stopAim)
@@ -1602,6 +1652,7 @@ actionRow("Recuperar ajustes", "CARGAR", function()
     setSaveStatus(message)
 end)
 
+actionRow("Actualizar busqueda", "ESCANEAR", function() queueItemScan() end)
 queueItemScan()
 local minim = false
 listen(minBtn.MouseButton1Click, function()
@@ -1631,6 +1682,13 @@ listen(UIS.InputEnded, function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
 end)
 
+listen(UIS.WindowFocusReleased, function()
+    zoomOff()
+    stopAim()
+    dragging, captureKey, captureAimKey = false, false, false
+    refreshAll()
+end)
+
 local function cleanup()
     if not alive then return end
     if CFG.AutoSave then saveSettings() end
@@ -1653,14 +1711,7 @@ local function cleanup()
 end
 listen(closeBtn.MouseButton1Click, cleanup)
 
-local okEnv, env = pcall(function()
-    if type(getgenv) == "function" then return getgenv() end
-    return _G
-end)
-if okEnv and type(env) == "table" then
-    if type(env.RSWA_PD_Stop) == "function" then pcall(env.RSWA_PD_Stop) end
-    env.RSWA_PD_Stop = cleanup
-end
+if okEnv and type(env) == "table" then env.RSWA_PD_Stop = cleanup end
 
 -- Zoom despues de la camara: se aplica cuando el juego modifica su FOV.
 RunService:BindToRenderStep("RSWA_PD_Zoom", Enum.RenderPriority.Camera.Value + 1, function()
@@ -1684,7 +1735,7 @@ listen(RunService.RenderStepped, function(dt)
         fovCircle.Visible = CFG.Aimbot and CFG.AimFOV
         if CFG.Aimbot and aimActive and lockedTarget and not targetSpent then
             local hum = humanoid(lockedTarget)
-            if not lockedTarget.Parent or not hum or hum.Health <= 0 then
+            if not lockedTarget:IsDescendantOf(Workspace) or not hum or hum.Health <= 0 then
                 lockedTarget = nil
                 targetSpent = true
             else
@@ -1725,13 +1776,14 @@ listen(RunService.RenderStepped, function(dt)
         else updateESP(e, p.Character, p, false, cam, origin) end
     end
     for model, e in pairs(npcCache) do
-        if not model.Parent or Players:GetPlayerFromCharacter(model) then
+        if not model:IsDescendantOf(Workspace) or model == me.Character or Players:GetPlayerFromCharacter(model) then
             removeNPC(model)
         elseif corpseCache[model] then hide(e.d)
         else updateESP(e, model, nil, true, cam, origin) end
     end
     for model, e in pairs(corpseCache) do
-        if not model:IsDescendantOf(Workspace) then removeCorpse(model)
+        local hum = humanoid(model)
+        if not model:IsDescendantOf(Workspace) or (hum and hum.Health > 0) then removeCorpse(model)
         else updateESP(e, model, nil, true, cam, origin) end
     end
     updateItemESP(cam, origin)
