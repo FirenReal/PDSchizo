@@ -1,4 +1,6 @@
--- RSWA Project Delta | ESP + Zoom + Aimbot con bloqueo de objetivo
+-- RSWA Project Delta | siluetas, ficha observada y tercera persona
+-- Revision 2026-11-01. No probado en juego. Sin garantia contra baneos.
+-- La ficha solo muestra datos replicados; no verifica si alguien es administrador.
 -- El aimbot NO cambia a otro objetivo al morir el seleccionado.
 -- Compatibilidad: modelos replicados con Humanoid + Head (R6/R15/custom).
 
@@ -6,7 +8,7 @@ local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local RunService = game:GetService("RunService")
 local UIS = game:GetService("UserInputService")
-local CoreGui = game:GetService("CoreGui")
+local PlayerGui = nil
 local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local me = Players.LocalPlayer
@@ -18,12 +20,27 @@ if type(draw) ~= "function" then
     return
 end
 
+-- Cerrar la instancia anterior antes de instalar efectos o restaurar atributos.
+local okEnv, env = pcall(function()
+    if type(getgenv)=="function" then return getgenv() end
+    return _G
+end)
+if okEnv and type(env)=="table" and type(env.RSWA_PD_Stop)=="function" then
+    local stopped,reason=pcall(env.RSWA_PD_Stop)
+    if not stopped then warn("RSWA: no se pudo cerrar la instancia previa: "..tostring(reason));return end
+    env.RSWA_PD_Stop=nil
+end
+PlayerGui=me:WaitForChild("PlayerGui",10)
+if not PlayerGui then warn("RSWA: no se encontro PlayerGui");return end
+local Addons = {}
 local V2, V3, RGB = Vector2.new, Vector3.new, Color3.fromRGB
 local clamp = math.clamp
 local CFG = {
     ESP = true, Players = true, NPC = true,
     Names = true, Health = true, Distance = true,
-    Boxes = true, HeadDot = true, HealthBar = true,
+    Boxes = false, HeadDot = false, HealthBar = true,
+    Chams = true, ChamsThroughWalls = true, ChamsTransparency = 30, ChamsLimit = 24,
+    InspectPlayer = true, InspectDistance = 500, ShowEquipped = true,
     TeamFilter = false, MaxDistance = 2200, UpdateHz = 25,
     BoxMode = "Corners", TextSize = 13, DotSize = 4,
     PlayerPalette = "Yellow", NPCPalette = "Blue", DeadPalette = "Gray",
@@ -61,6 +78,7 @@ local SETTINGS_LIMITS = {
     AimMaxDistance = {200, 5000}, AimSmooth = {0.05, 0.95},
     ItemMaxDistance = {200, 5000}, ItemMaxMarkers = {5, 80},
     RecoilPercent = {0, 100},
+    ChamsTransparency = {0, 90}, ChamsLimit = {1, 24}, InspectDistance = {50, 1500},
 }
 local SETTINGS_OPTIONS = {
     BoxMode = {Full = true, Corners = true},
@@ -126,7 +144,8 @@ local function loadSettings()
             local options = SETTINGS_OPTIONS[key]
             if limits and type(value) == "number" and value == value
                 and value ~= math.huge and value ~= -math.huge then
-                CFG[key] = math.clamp(value, limits[1], limits[2])
+                local bounded = math.clamp(value, limits[1], limits[2])
+                CFG[key] = (key=="ChamsLimit" or key=="ChamsTransparency" or key=="InspectDistance") and math.floor(bounded+.5) or bounded
             elseif options and options[value] then
                 CFG[key] = value
             elseif not limits and not options then
@@ -922,6 +941,7 @@ local function updateESP(e, model, p, npc, cam, origin)
     if not r then hide(d); return end
     local dist = (r.Position - origin).Magnitude
     if dist > CFG.MaxDistance then hide(d); return end
+    Addons.queue(model,dist)
 
     local upper, lower, height, width, center, left, head2d
     if isDead then
@@ -1001,7 +1021,7 @@ local function updateESP(e, model, p, npc, cam, origin)
     if CFG.Names then
         d.name.Text = isDead and ("[CUERPO] " .. (e.label or model.Name))
             or (npc and model.Name or (p.DisplayName or p.Name))
-        d.name.Position, d.name.Color = V2(center, upper - 18), c
+        d.name.Position, d.name.Color = V2(center, upper - 18), COLOR.Text
         d.name.Size, d.name.Transparency, d.name.Visible = CFG.TextSize, opacity, true
     else d.name.Visible = false end
     if CFG.Health or CFG.Distance then
@@ -1009,6 +1029,10 @@ local function updateESP(e, model, p, npc, cam, origin)
         local distanceText = tostring(math.floor(dist + 0.5)) .. " studs"
         d.status.Text = CFG.Health and CFG.Distance and (hpText .. " | " .. distanceText)
             or (CFG.Health and hpText or distanceText)
+        if CFG.ShowEquipped and not isDead then
+            local equipped = Addons.weapon(model)
+            if equipped then d.status.Text = d.status.Text .. "\n" .. truncateText(equipped, 26) end
+        end
         d.status.Position, d.status.Visible = V2(center, lower + 4), true
         d.status.Size = math.max(9, CFG.TextSize - 2)
         d.status.Transparency = opacity
@@ -1132,6 +1156,7 @@ listen(UIS.InputBegan, function(input, consumed)
     if not alive then return end
     if captureKey or captureAimKey then return end
     if consumed or UIS:GetFocusedTextBox() then return end
+    if input.KeyCode==Enum.KeyCode.I or Addons.third then return end
     if input.UserInputType == Enum.UserInputType.Keyboard
         and input.KeyCode == CFG.ZoomKey and CFG.Zoom then
         if CFG.ZoomMode == "Toggle" then
@@ -1165,11 +1190,11 @@ listen(UIS.InputEnded, function(input)
 end)
 
 -- UI compacta RSWA.
-local oldGui = CoreGui:FindFirstChild("RSWA_ProjectDelta")
+local oldGui = PlayerGui:FindFirstChild("RSWA_ProjectDelta")
 if oldGui then oldGui:Destroy() end
 local gui = Instance.new("ScreenGui")
 gui.Name, gui.IgnoreGuiInset, gui.ResetOnSpawn = "RSWA_ProjectDelta", true, false
-gui.Parent = CoreGui
+gui.Parent = PlayerGui
 local function make(class, props)
     local item = Instance.new(class)
     for k, v in pairs(props) do item[k] = v end
@@ -1311,6 +1336,7 @@ local function keyRow()
     end)
     listen(UIS.InputBegan, function(input)
         if not alive or not captureKey then return end
+        Addons.keyCapturedUntil=os.clock()+.15
         if input.UserInputType == Enum.UserInputType.Keyboard then
             if input.KeyCode ~= Enum.KeyCode.Escape
                 and input.KeyCode ~= Enum.KeyCode.Unknown then CFG.ZoomKey = input.KeyCode end
@@ -1351,6 +1377,7 @@ local function aimKeyRow()
     end)
     listen(UIS.InputBegan, function(input)
         if not alive or not captureAimKey then return end
+        Addons.keyCapturedUntil=os.clock()+.15
         if input.UserInputType == Enum.UserInputType.Keyboard then
             if input.KeyCode ~= Enum.KeyCode.Escape
                 and input.KeyCode ~= Enum.KeyCode.Unknown then CFG.AimKey = input.KeyCode end
@@ -1602,6 +1629,289 @@ actionRow("Recuperar ajustes", "CARGAR", function()
     setSaveStatus(message)
 end)
 
+-- Extension local: siluetas, ficha del jugador observado y camara orbital.
+-- No solicita inventarios al servidor ni deduce privilegios por nombre o aspecto.
+do
+    Addons.marks, Addons.pending = {}, {}
+    Addons.folder = Instance.new("Folder")
+    Addons.folder.Name = "RSWA_LocalSilhouettes"
+    Addons.folder.Parent = Workspace
+    function Addons.weapon(model)
+        if not model then return nil end
+        for _,obj in ipairs(model:GetChildren()) do
+            if obj:IsA("Tool") then return obj:GetAttribute("DisplayName") or obj.Name end
+        end
+        return nil
+    end
+    function Addons.beginESP() Addons.pending = {} end
+    function Addons.queue(model,distance)
+        if CFG.Chams and CFG.ESP then Addons.pending[#Addons.pending+1]={model=model,distance=distance} end
+    end
+    function Addons.hideESP()
+        for _,mark in pairs(Addons.marks) do mark.Enabled=false end
+    end
+    function Addons.finishESP()
+        table.sort(Addons.pending,function(a,b) return a.distance<b.distance end)
+        local wanted={}
+        if CFG.Chams and CFG.ESP then
+            for index=1,math.min(#Addons.pending,CFG.ChamsLimit) do
+                local model=Addons.pending[index].model
+                if model~=me.Character and model:IsDescendantOf(Workspace) then wanted[model]=true end
+            end
+        end
+        for model,mark in pairs(Addons.marks) do
+            if not wanted[model] then mark:Destroy();Addons.marks[model]=nil end
+        end
+        for model in pairs(wanted) do
+            local mark=Addons.marks[model]
+            if not mark then
+                mark=Instance.new("Highlight");mark.Name="RSWA_Silhouette";mark.Adornee=model
+                mark.Parent=Addons.folder;Addons.marks[model]=mark
+            end
+            mark.FillColor=RGB(183,53,40)
+            mark.OutlineColor=RGB(255,248,231)
+            mark.FillTransparency=CFG.ChamsTransparency/100
+            mark.OutlineTransparency=0
+            mark.DepthMode=CFG.ChamsThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+            mark.Enabled=true
+        end
+    end
+end
+
+do
+    local function clean(value,limit)
+        value=tostring(value):gsub("[%c]"," ")
+        local ok,offset=pcall(utf8.offset,value,(limit or 48)+1)
+        if ok then return offset and value:sub(1,offset-1).."…" or value end
+        return value:gsub("[^%w%s%p]","?"):sub(1,limit or 48)
+    end
+    local card=make("Frame",{Name="ObservedPlayer",AnchorPoint=V2(.5,1),Position=UDim2.new(.5,0,1,-14),Size=UDim2.fromOffset(324,216),BackgroundColor3=COLOR.UI,BorderSizePixel=0,Visible=false,Parent=gui})
+    roundBox(card,9)
+    make("UIStroke",{Color=RGB(60,82,91),Thickness=1,Parent=card})
+    local avatar=make("ImageLabel",{Position=UDim2.fromOffset(10,10),Size=UDim2.fromOffset(44,44),BackgroundColor3=COLOR.Panel,Image="",Parent=card})
+    roundBox(avatar,7)
+    local function label(value,position,size,color)
+        return make("TextLabel",{Text=value,Position=position,Size=size,BackgroundTransparency=1,Font=Enum.Font.Gotham,TextSize=11,TextColor3=color or COLOR.Text,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,Parent=card})
+    end
+    local identity=label("",UDim2.fromOffset(64,10),UDim2.new(1,-74,0,46))
+    local role=label("Admin: sin verificar",UDim2.fromOffset(10,63),UDim2.new(1,-20,0,30),COLOR.Muted)
+    local inventory=make("ScrollingFrame",{Position=UDim2.fromOffset(10,99),Size=UDim2.new(1,-20,1,-126),BackgroundColor3=COLOR.Panel,BorderSizePixel=0,ScrollBarThickness=3,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,Parent=card})
+    roundBox(inventory,5)
+    local items=make("TextLabel",{Position=UDim2.fromOffset(7,5),Size=UDim2.new(1,-18,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1,Text="",TextWrapped=true,Font=Enum.Font.Gotham,TextSize=11,TextColor3=COLOR.Text,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,Parent=inventory})
+    label("Solo datos visibles al cliente · no verifica privilegios",UDim2.new(0,10,1,-22),UDim2.new(1,-20,0,18),COLOR.Muted)
+    local ray=RaycastParams.new();ray.FilterType=Enum.RaycastFilterType.Exclude
+    local shown,lastSeen,elapsed=nil,0,0
+    local thumbnailCache={}
+    local thumbnailBusy={}
+    local function thumbnail(player)
+        local cached=thumbnailCache[player.UserId]
+        avatar.Image=cached or ""
+        if cached or thumbnailBusy[player.UserId] then return end
+        thumbnailBusy[player.UserId]=true
+        task.spawn(function()
+            local ok,url,ready=pcall(function() return Players:GetUserThumbnailAsync(player.UserId,Enum.ThumbnailType.HeadShot,Enum.ThumbnailSize.Size100x100) end)
+            if ok and ready and type(url)=="string" then thumbnailCache[player.UserId]=url end
+            -- Una respuesta tardia nunca cambia la foto de otro jugador.
+            if alive and shown==player and avatar.Parent then avatar.Image=thumbnailCache[player.UserId] or "" end
+            -- Una miniatura pendiente/fallida queda sin foto en esta sesion;
+            -- no se vuelve a solicitar en cada actualizacion de la ficha.
+        end)
+    end
+    local function roleText(player)
+        for _,name in ipairs({"IsAdmin","Admin","IsModerator","IsStaff"}) do
+            local value=player:GetAttribute(name)
+            if value~=nil then return "Admin: sin verificar · atributo "..name.."="..clean(value,16) end
+        end
+        for _,name in ipairs({"Role","AdminRank","StaffRole"}) do
+            local value=player:GetAttribute(name)
+            if type(value)=="string" or type(value)=="number" then return "Admin: sin verificar · "..name..": "..clean(value,22) end
+        end
+        return "Admin: sin verificar · no hay dato explicito"
+    end
+    local function inventoryText(player)
+        local equipped={}
+        local character=player.Character
+        if character then
+            for _,tool in ipairs(character:GetChildren()) do
+                if tool:IsA("Tool") then equipped[#equipped+1]=clean(tool:GetAttribute("DisplayName") or tool.Name,40) end
+            end
+        end
+        table.sort(equipped)
+        local lines={"Equipado: "..(#equipped>0 and table.concat(equipped,", ") or "no observado")}
+        local seen,counts={},{}
+        local total,truncated=0,false
+        local function collect(folder,depth)
+            if not folder or depth>2 then return end
+            local children=folder:GetChildren()
+            for index,obj in ipairs(children) do
+                if index>64 or total>=32 then truncated=true;break end
+                if obj:IsA("Tool") or obj:IsA("StringValue") or (obj:IsA("Model") and (obj:GetAttribute("ItemName") or obj:GetAttribute("DisplayName"))) then
+                    if not seen[obj] then
+                        seen[obj]=true
+                        local name=obj:GetAttribute("ItemName") or obj:GetAttribute("DisplayName") or (obj:IsA("StringValue") and obj.Value~="" and obj.Value) or obj.Name
+                        name=clean(name,44)
+                        counts[name]=(counts[name] or 0)+1;total=total+1
+                    end
+                elseif obj:IsA("Folder") then collect(obj,depth+1) end
+            end
+        end
+        collect(player:FindFirstChildOfClass("Backpack"),0)
+        for _,parent in ipairs({player,character or player}) do
+            for _,name in ipairs({"Inventory","Inventario","Items"}) do collect(parent:FindFirstChild(name),0) end
+        end
+        if total==0 then
+            lines[#lines+1]="Mochila: no disponible / no replicada. No significa que este vacia."
+        else
+            lines[#lines+1]="Inventario observado (parcial):"
+            local names={};for name in pairs(counts) do names[#names+1]=name end;table.sort(names)
+            for _,name in ipairs(names) do lines[#lines+1]="• "..name..(counts[name]>1 and " x"..counts[name] or "") end
+            if truncated then lines[#lines+1]="… listado limitado a 32 entradas" end
+        end
+        return table.concat(lines,"\n")
+    end
+    function Addons.inspectStep(dt)
+        elapsed=elapsed+dt
+        if elapsed<.2 then return end
+        elapsed=0
+        local camera=Workspace.CurrentCamera
+        if not CFG.InspectPlayer or not camera then card.Visible=false;shown=nil;return end
+        local excluded={camera};if me.Character then excluded[#excluded+1]=me.Character end
+        ray.FilterDescendantsInstances=excluded
+        local hit=Workspace:Raycast(camera.CFrame.Position,camera.CFrame.LookVector*CFG.InspectDistance,ray)
+        local player,node=nil,hit and hit.Instance
+        while node and node~=Workspace do
+            if node:IsA("Model") then player=Players:GetPlayerFromCharacter(node);if player then break end end
+            node=node.Parent
+        end
+        if player==me then player=nil end
+        if player then
+            lastSeen=os.clock()
+            if shown~=player then shown=player;inventory.CanvasPosition=V2(0,0);thumbnail(player) end
+        elseif shown and shown.Parent==Players and os.clock()-lastSeen<.35 then player=shown
+        else card.Visible=false;shown=nil;return end
+        local root=player.Character and rootPart(player.Character)
+        local distance=root and (root.Position-camera.CFrame.Position).Magnitude
+        identity.Text=clean(player.DisplayName,22).."  @"..clean(player.Name,22).."\nID "..player.UserId.." · "..player.AccountAge.." dias"..(distance and string.format(" · %.0f studs",distance) or "")
+        role.Text=roleText(player)
+        items.Text=inventoryText(player)
+        card.Size=UDim2.fromOffset(math.max(160,math.min(324,camera.ViewportSize.X-20)),math.max(150,math.min(216,camera.ViewportSize.Y-80)))
+        card.Visible=true
+    end
+end
+
+do
+    Addons.third=false
+    Addons.thirdDistance=12
+    Addons.cameraSnapshots={}
+    Addons.transparency={}
+    local ray=RaycastParams.new();ray.FilterType=Enum.RaycastFilterType.Exclude
+    local yaw,pitch=0,0
+    local mouseBefore,rotating=nil,false
+    local function restoreMouse()
+        if mouseBefore then UIS.MouseBehavior=mouseBefore end
+        mouseBefore=nil;rotating=false
+    end
+    local function rememberCamera(camera)
+        if not Addons.cameraSnapshots[camera] then
+            Addons.cameraSnapshots[camera]={kind=camera.CameraType,subject=camera.CameraSubject,cf=camera.CFrame,focus=camera.Focus}
+        end
+    end
+    function Addons.stopThird()
+        Addons.third=false
+        restoreMouse()
+        for camera,saved in pairs(Addons.cameraSnapshots) do
+            if camera.Parent then
+                pcall(function()
+                    camera.CameraType=saved.kind
+                    local subject=saved.subject
+                    if not subject or not subject.Parent then subject=me.Character and humanoid(me.Character) end
+                    camera.CameraSubject=subject
+                    camera.CFrame=saved.cf;camera.Focus=saved.focus
+                end)
+            end
+        end
+        Addons.cameraSnapshots={}
+        for part,value in pairs(Addons.transparency) do
+            if part.Parent then pcall(function() part.LocalTransparencyModifier=value end) end
+        end
+        Addons.transparency={}
+    end
+    function Addons.toggleThird()
+        if Addons.third then Addons.stopThird();return end
+        local camera=Workspace.CurrentCamera
+        if not camera then return end
+        zoomOff();stopAim()
+        local look=camera.CFrame.LookVector
+        yaw=math.atan2(-look.X,-look.Z)
+        pitch=math.asin(clamp(look.Y,-.95,.95))
+        Addons.third=true
+        rememberCamera(camera)
+    end
+    function Addons.cameraStep()
+        if not alive or not Addons.third then return end
+        local camera=Workspace.CurrentCamera
+        local character=me.Character
+        local root=character and rootPart(character)
+        if not camera or not root then return end
+        rememberCamera(camera)
+        local excluded={camera,character};ray.FilterDescendantsInstances=excluded
+        local pivot=root.Position+V3(0,2,0)
+        local rotation=CFrame.fromOrientation(pitch,yaw,0)
+        local offset=rotation:VectorToWorldSpace(V3(0,0,Addons.thirdDistance))
+        local hit=Workspace:Raycast(pivot,offset,ray)
+        local length=hit and math.max(.5,hit.Distance-.45) or offset.Magnitude
+        local position=pivot+offset.Unit*length
+        camera.CameraType=Enum.CameraType.Scriptable
+        camera.CFrame=CFrame.lookAt(position,pivot)
+        camera.Focus=CFrame.new(pivot)
+        for _,part in ipairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if Addons.transparency[part]==nil then Addons.transparency[part]=part.LocalTransparencyModifier end
+                part.LocalTransparencyModifier=0
+            end
+        end
+        if rotating and not UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then restoreMouse() end
+    end
+    listen(UIS.InputBegan,function(input,consumed)
+        if not alive or consumed or UIS:GetFocusedTextBox() or captureKey or captureAimKey then return end
+        if os.clock()<(Addons.keyCapturedUntil or 0) then return end
+        if input.KeyCode==Enum.KeyCode.I then Addons.toggleThird() end
+        if Addons.third and input.UserInputType==Enum.UserInputType.MouseButton2 then
+            rotating=true;mouseBefore=UIS.MouseBehavior;UIS.MouseBehavior=Enum.MouseBehavior.LockCurrentPosition
+        end
+    end)
+    listen(UIS.InputEnded,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton2 then restoreMouse() end
+    end)
+    listen(UIS.InputChanged,function(input,consumed)
+        if not alive or not Addons.third or consumed or UIS:GetFocusedTextBox() then return end
+        if input.UserInputType==Enum.UserInputType.MouseMovement and rotating then
+            yaw=yaw-input.Delta.X*.003
+            pitch=clamp(pitch-input.Delta.Y*.003,-1.2,1.2)
+        elseif input.UserInputType==Enum.UserInputType.MouseWheel then
+            Addons.thirdDistance=clamp(Addons.thirdDistance-input.Position.Z,6,24)
+        end
+    end)
+    listen(UIS.WindowFocusReleased,function() restoreMouse();zoomOff();stopAim() end)
+    RunService:BindToRenderStep("RSWA_PD_ThirdPerson",Enum.RenderPriority.Camera.Value+2,Addons.cameraStep)
+end
+
+function Addons.destroy()
+    Addons.stopThird()
+    pcall(function() RunService:UnbindFromRenderStep("RSWA_PD_ThirdPerson") end)
+    Addons.marks={}
+    if Addons.folder then Addons.folder:Destroy() end
+end
+
+toggle("Silueta roja / borde claro", "Chams")
+toggle("Silueta tras obstaculos", "ChamsThroughWalls")
+numberRow("Transparencia silueta", "ChamsTransparency", 0, 90, 5, "%")
+numberRow("Max siluetas", "ChamsLimit", 1, 24, 1, "")
+toggle("Arma equipada en ESP", "ShowEquipped")
+toggle("Ficha del jugador observado", "InspectPlayer")
+numberRow("Alcance ficha", "InspectDistance", 50, 1500, 50, "")
+actionRow("Tercera persona [I]", "CAMBIAR", Addons.toggleThird)
+
 queueItemScan()
 local minim = false
 listen(minBtn.MouseButton1Click, function()
@@ -1633,6 +1943,7 @@ end)
 
 local function cleanup()
     if not alive then return end
+    Addons.destroy()
     if CFG.AutoSave then saveSettings() end
     restoreRecoil()
     alive = false
@@ -1652,15 +1963,9 @@ local function cleanup()
     if gui.Parent then gui:Destroy() end
 end
 listen(closeBtn.MouseButton1Click, cleanup)
+listen(gui.Destroying,function() if alive then cleanup() end end)
 
-local okEnv, env = pcall(function()
-    if type(getgenv) == "function" then return getgenv() end
-    return _G
-end)
-if okEnv and type(env) == "table" then
-    if type(env.RSWA_PD_Stop) == "function" then pcall(env.RSWA_PD_Stop) end
-    env.RSWA_PD_Stop = cleanup
-end
+if okEnv and type(env)=="table" then env.RSWA_PD_Stop=cleanup end
 
 -- Zoom despues de la camara: se aplica cuando el juego modifica su FOV.
 RunService:BindToRenderStep("RSWA_PD_Zoom", Enum.RenderPriority.Camera.Value + 1, function()
@@ -1676,13 +1981,14 @@ end)
 local elapsed = 0
 listen(RunService.RenderStepped, function(dt)
     if not alive then return end
+    Addons.inspectStep(dt)
     -- Dibujo FOV y apuntado; la búsqueda ocurre únicamente en startAim().
     local aimCam = Workspace.CurrentCamera
     if aimCam then
         local cursor = aimCursor(aimCam)
         fovCircle.Position, fovCircle.Radius = cursor, CFG.AimFOVRadius
         fovCircle.Visible = CFG.Aimbot and CFG.AimFOV
-        if CFG.Aimbot and aimActive and lockedTarget and not targetSpent then
+        if CFG.Aimbot and not Addons.third and aimActive and lockedTarget and not targetSpent then
             local hum = humanoid(lockedTarget)
             if not lockedTarget.Parent or not hum or hum.Health <= 0 then
                 lockedTarget = nil
@@ -1705,6 +2011,7 @@ listen(RunService.RenderStepped, function(dt)
     elapsed = 0
     local cam = Workspace.CurrentCamera
     if not cam then
+        Addons.hideESP()
         for _, e in pairs(playerCache) do hide(e.d) end
         for _, e in pairs(npcCache) do hide(e.d) end
         for _, e in pairs(corpseCache) do hide(e.d) end
@@ -1718,6 +2025,7 @@ listen(RunService.RenderStepped, function(dt)
         end
         return
     end
+    Addons.beginESP()
     local myRoot = rootPart(me.Character)
     local origin = myRoot and myRoot.Position or cam.CFrame.Position
     for p, e in pairs(playerCache) do
@@ -1734,5 +2042,6 @@ listen(RunService.RenderStepped, function(dt)
         if not model:IsDescendantOf(Workspace) then removeCorpse(model)
         else updateESP(e, model, nil, true, cam, origin) end
     end
+    Addons.finishESP()
     updateItemESP(cam, origin)
 end)
