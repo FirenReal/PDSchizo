@@ -1197,6 +1197,8 @@ local oldGui = PlayerGui:FindFirstChild("RSWA_ProjectDelta")
 if oldGui then oldGui:Destroy() end
 local gui = Instance.new("ScreenGui")
 gui.Name, gui.IgnoreGuiInset, gui.ResetOnSpawn = "RSWA_ProjectDelta", true, false
+gui.DisplayOrder = 1000
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = PlayerGui
 local function make(class, props)
     local item = Instance.new(class)
@@ -1688,7 +1690,7 @@ do
         if ok then return offset and value:sub(1,offset-1).."…" or value end
         return value:gsub("[^%w%s%p]","?"):sub(1,limit or 48)
     end
-    local card=make("Frame",{Name="ObservedPlayer",AnchorPoint=V2(.5,1),Position=UDim2.new(.5,0,1,-14),Size=UDim2.fromOffset(324,98),BackgroundColor3=COLOR.UI,BorderSizePixel=0,Visible=false,Parent=gui})
+    local card=make("Frame",{Name="ObservedPlayer",AnchorPoint=V2(.5,1),Position=UDim2.new(.5,0,1,-140),Size=UDim2.fromOffset(324,98),ZIndex=20,BackgroundColor3=COLOR.UI,BorderSizePixel=0,Visible=false,Parent=gui})
     roundBox(card,9)
     make("UIStroke",{Color=RGB(60,82,91),Thickness=1,Parent=card})
     local avatar=make("ImageLabel",{Position=UDim2.fromOffset(10,10),Size=UDim2.fromOffset(44,44),BackgroundColor3=COLOR.Panel,Image="",Parent=card})
@@ -1752,6 +1754,8 @@ do
         identity.Text=clean(player.DisplayName,22).."  @"..clean(player.Name,22).."\nID "..player.UserId.." · "..player.AccountAge.." dias"..(distance and string.format(" · %.0f studs",distance) or "")
         role.Text=roleText(player)
         card.Size=UDim2.fromOffset(math.max(160,math.min(324,camera.ViewportSize.X-20)),98)
+        local lift=math.min(140,math.max(14,camera.ViewportSize.Y-118))
+        card.Position=UDim2.new(.5,0,1,-lift)
         card.Visible=true
     end
 end
